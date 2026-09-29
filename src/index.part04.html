@@ -202,7 +202,11 @@ function openSheet() { if (isMobile() && sheetState() === "min") setSheet("open"
 function updateSheetTitle() {
   const el = $("#sheetTitle"); if (!el) return;
   const h = $("#side").querySelector("h2");
-  el.textContent = h ? h.textContent.trim().replace(/\s+/g, " ") : "Details";
+  if (!h) { el.textContent = "Details"; return; }
+  const c = h.cloneNode(true), badge = c.querySelector(".badge");
+  if (badge) badge.remove();
+  const main = c.textContent.trim().replace(/\s+/g, " ");
+  el.textContent = badge ? `${main} · ${badge.textContent.trim()}` : main;
 }
 $("#sheetHandle").addEventListener("click", e => { if (e.target.closest("#sheetMax")) return; setSheet(sheetState() === "min" ? "open" : "min"); });
 $("#sheetMax").addEventListener("click", e => { e.stopPropagation(); setSheet(sheetState() === "full" ? "open" : "full"); });
