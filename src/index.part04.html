@@ -1,0 +1,242 @@
+      seen.add(key); paths.push(p);
+      if (paths.length >= MAX_PATHS * 4) break;
+    }
+  }
+  paths.sort((a, b) => a.length - b.length);
+  return paths.slice(0, MAX_PATHS).map(addrs => ({ addrs, hops: hopsOf(S, addrs) }));
+}
+function countPaths(S) { return S.meets.size ? buildPaths(S).length : 0; }
+function hopsOf(S, addrs) {
+  const hops = [];
+  for (let i = 0; i < addrs.length - 1; i++) {
+    const u = addrs[i], v = addrs[i + 1];
+    const k = u < v ? u + "|" + v : v + "|" + u;
+    let list = [...(S.edges.get(k) || new Map()).values()];
+    if (!S.opts.undirected) list = list.filter(e => e.from === u && e.to === v && e.kind === "flow");
+    list.sort((a, b) => b.time - a.time);
+    hops.push({ u, v, txs: list });
+  }
+  return hops;
+}
+
+function finishSearch(S) {
+  const paths = buildPaths(S);
+  conn.result = { A: S.A, B: S.B, paths, S, elapsed: Date.now() - S.started };
+  // Graph nur aus Pfaden aufbauen
+  resetGraph();
+  rootId = S.A;
+  const a = addrNode(S.A, null); a.root = true; a.x = -250; a.y = 0; a.fx = null;
+  const b = addrNode(S.B, null); b.isB = true; b.x = 250; b.y = 0;
+  const decorate = n => { const st = S.info.get(n.addr); if (st && !n.stats) n.stats = st; if (S.hubs.has(n.addr)) n.hub = true; };
+  paths.forEach((p, pi) => {
+    p.linkIds = new Set();
+    p.addrs.forEach((ad, i) => {
+      const prev = nodes.get(p.addrs[Math.max(0, i - 1)]);
+      const n = addrNode(ad, prev ? { x: -250 + 500 * i / (p.addrs.length - 1), y: (pi % 2 ? 1 : -1) * (40 + 30 * pi) - 0 } : null);
+      decorate(n);
+    });
+    for (const h of p.hops) for (const e of h.txs.slice(0, MAX_TX_PER_HOP)) {
+      const tx = txStore.get(e.txid);
+      const src = nodes.get(e.from), dst = nodes.get(e.to);
+      const id = `${e.txid}|${e.from}|${e.to}`;
+      if (!links.has(id)) links.set(id, { id, source: src.id, target: dst.id, txid: e.txid, value: e.value, dir: e.kind === "co" ? "co" : "out", onPath: true });
+      p.linkIds.add(id);
+    }
+  });
+  $("#counters").style.display = "flex";
+  selected = null; update();
+  setTimeout(fitView, 900);
+  renderSide(); openSheet();
+  if (S.reason === "cancelled") toast(paths.length ? `Suche abgebrochen – ${paths.length} bis dahin gefundene Pfade werden angezeigt.` : "Suche abgebrochen.", "warn");
+  else if (paths.length) toast(`${paths.length} ${paths.length === 1 ? "Pfad" : "Pfade"} gefunden (kürzester: ${paths[0].addrs.length - 1} ${paths[0].addrs.length === 2 ? "Hop" : "Hops"}).`, "info");
+  else toast("Keine Verbindung innerhalb der gewählten Grenzen gefunden.", "warn", 7000);
+}
+
+function readOpts() {
+  const g = (id, lo, hi, def) => { const el = document.getElementById(id); if (!el) return def; let v = parseInt(el.value, 10); if (!Number.isFinite(v)) v = def; return Math.min(hi, Math.max(lo, v)); };
+  const o = conn.opts;
+  o.hops = g("optHops", 1, 6, o.hops); o.budget = g("optBudget", 5, 2000, o.budget);
+  o.maxTx = g("optMaxTx", 5, 200, o.maxTx); o.hub = g("optHub", 50, 1000000, o.hub);
+  const u = document.getElementById("optUndirected"); if (u) o.undirected = u.checked;
+  const l = document.getElementById("optLonger"); if (l) o.longer = l.checked;
+}
+
+function settingsHtml(open) {
+  const o = conn.opts;
+  return `<details class="card" ${open ? "open" : ""}><summary style="cursor:pointer;font-weight:600">Einstellungen &amp; Grenzen</summary>
+  <div class="form-grid" style="margin-top:12px">
+    <label for="optHops">Max. Zwischenstationen (1–6)</label><input type="number" id="optHops" min="1" max="6" value="${o.hops}">
+    <div class="help">Adressen zwischen A und B. 3 = Pfade mit bis zu 4 Transaktionen.</div>
+    <label for="optBudget">Max. abgefragte Adressen</label><input type="number" id="optBudget" min="5" max="2000" value="${o.budget}">
+    <div class="help">Gesamtbudget der Suche (je Adresse ≥ 2 API-Anfragen).</div>
+    <label for="optMaxTx">Max. Transaktionen je Adresse</label><input type="number" id="optMaxTx" min="5" max="200" value="${o.maxTx}">
+    <div class="help">Es werden die neuesten Transaktionen berücksichtigt.</div>
+    <label for="optHub">Hub-Schwelle (Transaktionen)</label><input type="number" id="optHub" min="50" value="${o.hub}">
+    <div class="help">Aktivere Adressen (z.&nbsp;B. Börsen) werden angezeigt, aber nicht weiter durchsucht.</div>
+  </div>
+  <label class="chk"><input type="checkbox" id="optUndirected" ${o.undirected ? "checked" : ""}><span><b>Richtung egal</b><br><span class="muted small">Jede gemeinsame Transaktion zählt als Verbindung (auch gemeinsame Inputs/Outputs).</span></span></label>
+  <label class="chk"><input type="checkbox" id="optLonger" ${o.longer ? "checked" : ""}><span><b>Auch längere Pfade suchen</b><br><span class="muted small">Nach dem ersten Fund weitersuchen, bis die Grenzen erreicht sind.</span></span></label>
+  </details>`;
+}
+
+function progressInner(S) {
+  const pct = Math.min(100, Math.round(100 * S.queried / S.opts.budget));
+  const secs = Math.round((Date.now() - S.started) / 1000);
+  const cur = [...S.current].map(shortAddr).join(", ");
+  return `<div class="big">${nfInt.format(S.queried)} <span class="muted small" style="font-weight:400">/ ${nfInt.format(S.opts.budget)} Adressen abgefragt</span></div>
+    <div class="bar"><div style="width:${pct}%"></div></div>
+    <div class="kv">
+      <div>Vorwärts-Front (von A)</div><div>${nfInt.format(S.frontF.length)} · Tiefe ${S.levelsF}</div>
+      <div>Rückwärts-Front (zu B)</div><div>${nfInt.format(S.frontB.length)} · Tiefe ${S.levelsB}</div>
+      <div>Bekannte Adressen</div><div>${nfInt.format(S.distF.size + S.distB.size)}</div>
+      <div>Treffpunkte</div><div>${nfInt.format(S.meets.size)}</div>
+      <div>Übersprungene Hubs</div><div>${nfInt.format(S.hubs.size)}</div>
+      <div>Laufzeit</div><div>${secs} s</div>
+    </div>
+    <div class="muted small" style="margin-top:8px;min-height:18px">${cur ? "Aktuell: <span class='mono'>" + esc(cur) + "</span>" : ""}</div>`;
+}
+function updateProgress() { const el = document.getElementById("progBox"); if (el && conn.S) el.innerHTML = progressInner(conn.S); }
+
+const reasonText = {
+  found: "Suche nach dem ersten Fund-Level beendet (kürzeste Pfade).",
+  budget: "Budget an abgefragten Adressen ausgeschöpft.",
+  depth: "Maximale Anzahl an Zwischenstationen erreicht.",
+  exhausted: "Keine weiteren durchsuchbaren Adressen (alle Fronten leer oder Hubs).",
+  maxpaths: `Maximal ${MAX_PATHS} Pfade erreicht.`,
+  cancelled: "Suche vom Benutzer abgebrochen.",
+  error: "Suche wegen eines Fehlers beendet.",
+};
+
+function renderConnectSide() {
+  const side = $("#side");
+  if (conn.result && selected && selected.type === "link" && links.has(selected.id)) { side.innerHTML = txHtml(links.get(selected.id)); bindSide(); return; }
+  if (conn.result && selected && selected.type === "node" && nodes.has(selected.id)) { side.innerHTML = nodeHtml(nodes.get(selected.id)); bindSide(); return; }
+  let h = "";
+  if (conn.running) {
+    h += `<h2><span class="spinner" style="display:inline-block"></span> Suche läuft…</h2>
+      <div class="small muted" style="margin-bottom:10px"><span class="tagA">A</span> <span class="mono">${shortAddr(conn.S.A)}</span> → <span class="tagB">B</span> <span class="mono">${shortAddr(conn.S.B)}</span>${conn.S.opts.undirected ? " · Richtung egal" : ""}</div>
+      <div class="card prog" id="progBox">${progressInner(conn.S)}</div>
+      <button id="cancelBtn" style="width:100%;border-color:#ff5d6c88">■ Suche abbrechen</button>`;
+    side.innerHTML = h;
+    $("#cancelBtn").onclick = () => { cancelSearch(); $("#cancelBtn").disabled = true; $("#cancelBtn").textContent = "Wird abgebrochen…"; };
+    return;
+  }
+  const r = conn.result;
+  if (!r) {
+    h += `<h2>Verbindung suchen</h2><div class="welcome"><p>Gib oben zwei Adressen ein. Gesucht werden Transaktionspfade von <span class="tagA">A</span> nach <span class="tagB">B</span> – direkt oder über Zwischenadressen.</p>
+      <p class="small">Die Suche läuft gleichzeitig <b>vorwärts von A</b> (wohin A Geld geschickt hat) und <b>rückwärts von B</b> (wer an B gezahlt hat) und trifft sich in der Mitte.</p></div>
+      ${settingsHtml(true)}
+      <button class="primary" id="startConnBtn" style="width:100%">Verbindung suchen</button>`;
+    side.innerHTML = h; bindConnect(); return;
+  }
+  const S = r.S;
+  const stats = `<div class="kv small" style="margin-top:8px"><div>Abgefragte Adressen</div><div>${nfInt.format(S.queried)} / ${nfInt.format(S.opts.budget)}</div>
+      <div>Suchtiefe (vorwärts / rückwärts)</div><div>${S.levelsF} / ${S.levelsB}</div><div>Übersprungene Hubs</div><div>${nfInt.format(S.hubs.size)}</div>
+      <div>Dauer</div><div>${Math.round(r.elapsed / 1000)} s</div><div>Modus</div><div>${S.opts.undirected ? "Richtung egal" : "Geldfluss A → B"}</div></div>
+      <p class="small muted" style="margin:8px 0 0">${esc(reasonText[S.reason] || "")}</p>`;
+  if (!r.paths.length) {
+    h += `<h2>Keine Verbindung gefunden</h2><div class="notice bad">Innerhalb der gewählten Grenzen (max. ${S.opts.hops} ${S.opts.hops === 1 ? "Zwischenstation" : "Zwischenstationen"}, ${S.opts.budget} Adressen, ${S.opts.maxTx} Tx je Adresse) wurde <b>keine Verbindung</b> von <span class="mono">${shortAddr(r.A)}</span> nach <span class="mono">${shortAddr(r.B)}</span> gefunden.
+      <br><br>Das ist <b>kein Beweis</b>, dass keine Verbindung existiert – die Suche betrachtet nur einen Ausschnitt der Blockchain.
+      <br><br><b>Tipp:</b> Grenzen erhöhen (mehr Adressen, mehr Transaktionen je Adresse, mehr Zwischenstationen), „Richtung egal“ aktivieren oder A und B tauschen.</div>
+      <div class="card">${stats}</div>`;
+  } else {
+    const shortest = r.paths[0].addrs.length - 1;
+    h += `<h2>${r.paths.length} ${r.paths.length === 1 ? "Pfad" : "Pfade"} gefunden</h2>
+      <div class="card"><div class="small"><span class="tagA">A</span> <span class="mono">${shortAddr(r.A)}</span> → <span class="tagB">B</span> <span class="mono">${shortAddr(r.B)}</span></div>
+      <div class="small" style="margin-top:4px">Kürzester Pfad: <b>${shortest} ${shortest === 1 ? "Hop (direkt)" : "Hops"}</b></div>${stats}
+      <div class="btnrow"><button data-act="allpaths">Alle Pfade zeigen</button></div></div>
+      <h3>Pfade (kürzeste zuerst)</h3><ul class="paths">`;
+    r.paths.forEach((p, i) => {
+      const hops = p.addrs.length - 1;
+      h += `<li class="${conn.activePath === i ? "active" : ""}"><div class="ph" data-path="${i}"><span><b>Pfad ${i + 1}</b> · ${hops} ${hops === 1 ? "Hop" : "Hops"} · ${hops - 1} ${hops - 1 === 1 ? "Zwischenadresse" : "Zwischenadressen"}</span><span class="muted">hervorheben</span></div>`;
+      p.hops.forEach(hp => {
+        const tag = a => a === r.A ? '<span class="tagA">A</span> ' : a === r.B ? '<span class="tagB">B</span> ' : "";
+        const e0 = hp.txs[0];
+        const arrow = !e0 ? "→" : e0.kind === "co" ? "↔" : e0.from === hp.u ? "→" : "←";
+        h += `<div class="hop"><div class="ad">${tag(hp.u)}<a class="mono" href="${addrUrl(hp.u)}" target="_blank" rel="noopener">${shortAddr(hp.u)}</a> <b>${arrow}</b> ${tag(hp.v)}<a class="mono" href="${addrUrl(hp.v)}" target="_blank" rel="noopener">${shortAddr(hp.v)}</a>
+           ${hp.txs.length > 1 ? `<span class="muted">(${hp.txs.length} Tx)</span>` : ""}</div>`;
+        hp.txs.slice(0, MAX_TX_PER_HOP).forEach(e => {
+          const tx = txStore.get(e.txid);
+          h += `<div class="tx"><a class="mono" href="${txUrl(e.txid)}" target="_blank" rel="noopener">${shortTx(e.txid)}</a><span>${e.kind === "co" ? "gemeinsam · " : ""}${btc(e.value)}</span><span>${tx ? (tx.status.confirmed ? fmtDate(tx) : "unbestätigt") : ""}</span></div>`;
+        });
+        if (hp.txs.length > MAX_TX_PER_HOP) h += `<div class="tx"><span>… ${hp.txs.length - MAX_TX_PER_HOP} weitere Tx</span></div>`;
+        h += `</div>`;
+      });
+      h += `</li>`;
+    });
+    h += `</ul>`;
+  }
+  h += `<h3>Neue Suche</h3>${settingsHtml(!r.paths.length)}<button class="primary" id="startConnBtn" style="width:100%">Mit diesen Einstellungen erneut suchen</button>`;
+  side.innerHTML = h; bindConnect();
+}
+function bindConnect() {
+  const sb = $("#startConnBtn"); if (sb) sb.onclick = () => startConnect();
+  ["optHops", "optBudget", "optMaxTx", "optHub", "optUndirected", "optLonger"].forEach(id => { const el = document.getElementById(id); if (el) el.onchange = readOpts; });
+  document.querySelectorAll("[data-path]").forEach(el => el.onclick = () => {
+    const i = +el.dataset.path, p = conn.result.paths[i];
+    if (conn.activePath === i) { conn.activePath = null; pathHL = null; }
+    else { conn.activePath = i; pathHL = { nodes: new Set(p.addrs), links: p.linkIds }; }
+    applyPathHighlight(); renderSide();
+  });
+  const all = document.querySelector("[data-act=allpaths]");
+  if (all) all.onclick = () => { conn.activePath = null; pathHL = null; applyPathHighlight(); renderSide(); };
+}
+$("#tabExplore").onclick = () => setMode("explore");
+$("#tabConnect").onclick = () => setMode("connect");
+$("#connectForm").addEventListener("submit", e => { e.preventDefault(); startConnect(); });
+$("#swapBtn").onclick = () => { const a = $("#addrA").value; $("#addrA").value = $("#addrB").value; $("#addrB").value = a; };
+["#addrA", "#addrB"].forEach(s => $(s).addEventListener("input", e => e.target.classList.remove("invalid")));
+
+/* ========================= Mobile: Bottom-Sheet & Header-Höhe ========================= */
+const isMobile = () => matchMedia("(max-width:900px)").matches;
+function setSheet(state) { // 'min' | 'open' | 'full'
+  const w = $("#sideWrap");
+  w.classList.toggle("open", state === "open"); w.classList.toggle("full", state === "full");
+  if (state === "min") w.scrollTop = 0;
+  if (nodes.size) setTimeout(fitView, 300); // Graph in den sichtbaren Bereich einpassen
+  $("#sheetToggle").textContent = state === "min" ? "▲" : "▼";
+  $("#sheetMax").textContent = state === "full" ? "⤡" : "⤢";
+}
+const sheetState = () => { const w = $("#sideWrap"); return w.classList.contains("full") ? "full" : w.classList.contains("open") ? "open" : "min"; };
+function openSheet() { if (isMobile() && sheetState() === "min") setSheet("open"); }
+function updateSheetTitle() {
+  const el = $("#sheetTitle"); if (!el) return;
+  const h = $("#side").querySelector("h2");
+  el.textContent = h ? h.textContent.trim().replace(/\s+/g, " ") : "Details";
+}
+$("#sheetHandle").addEventListener("click", e => { if (e.target.closest("#sheetMax")) return; setSheet(sheetState() === "min" ? "open" : "min"); });
+$("#sheetMax").addEventListener("click", e => { e.stopPropagation(); setSheet(sheetState() === "full" ? "open" : "full"); });
+new MutationObserver(updateSheetTitle).observe($("#side"), { childList: true });
+function syncHeader() { document.documentElement.style.setProperty("--hdr", $("header").offsetHeight + "px"); }
+new ResizeObserver(syncHeader).observe($("header")); syncHeader();
+if (isMobile()) { $("#legend").classList.add("collapsed"); $("#legendToggle").textContent = "▸"; }
+
+/* ========================= Initialisierung ========================= */
+$("#searchForm").addEventListener("submit", e => { e.preventDefault(); startWith($("#addrInput").value); });
+$("#addrInput").addEventListener("input", e => e.target.classList.remove("invalid"));
+$("#fitBtn").onclick = fitView;
+$("#resetBtn").onclick = () => { if (mode === "connect") { cancelSearch(); resetGraph(); conn.result = null; $("#empty").style.display = ""; $("#counters").style.display = "none"; history.replaceState(null, "", location.pathname + location.search); centerInitial(); renderSide(); return; } resetGraph(); history.replaceState(null, "", location.pathname + location.search); $("#addrInput").value = ""; $("#empty").style.display = ""; $("#counters").style.display = "none"; centerInitial(); renderSide(); };
+$("#showLabels").onchange = update;
+$("#legendToggle").onclick = () => { const l = $("#legend"); l.classList.toggle("collapsed"); $("#legendToggle").textContent = l.classList.contains("collapsed") ? "▸" : "▾"; };
+addEventListener("keydown", e => { if (e.key === "Escape") { selected = null; update(); renderSide(); } });
+renderSide(); updateStatus();
+function handleHash() {
+  const h = decodeURIComponent(location.hash.slice(1));
+  if (!h) return;
+  const m = h.match(/^verbindung=([^,]+),([^,&]+)(?:&(.*))?$/);
+  if (m) {
+    setMode("connect", true);
+    $("#addrA").value = m[1]; $("#addrB").value = m[2];
+    if (m[3]) for (const kv of m[3].split("&")) { const [k, v] = kv.split("="); if (k in conn.opts) conn.opts[k] = k === "undirected" || k === "longer" ? v === "1" : +v; }
+    renderSide();
+    if (!conn.running && !(conn.result && conn.result.A === m[1] && conn.result.B === m[2])) startConnect();
+  } else if (h !== rootId) { $("#addrInput").value = h; startWith(h); }
+}
+handleHash();
+addEventListener("hashchange", handleHash);
+</script>
+<script>
+  if (typeof d3 === "undefined") document.body.insertAdjacentHTML("beforeend", '<div class="toast error" style="position:fixed;top:80px;left:50%;transform:translateX(-50%);z-index:99">Die Grafik-Bibliothek D3 konnte nicht geladen werden (CDN nicht erreichbar). Bitte Internetverbindung prüfen.</div>');
+</script>
+</body>
+</html>
