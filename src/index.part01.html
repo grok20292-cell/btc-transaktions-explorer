@@ -1,0 +1,324 @@
+<div id="empty"><div class="box">
+  <div class="big">₿</div>
+  <div class="only-explore"><h2>Adresse eingeben, um zu starten</h2>
+  <div>Es werden die eingehenden Transaktionen der Adresse und ihre Absender angezeigt. Ein Klick auf einen Knoten lädt dessen ein- und ausgehende Transaktionen.</div></div>
+  <div class="only-connect" style="flex-direction:column"><h2>Zwei Adressen eingeben</h2>
+  <div>Der Explorer sucht Transaktionspfade von A nach B – auch indirekt über Zwischenadressen – und zeigt nur die gefundenen Pfade.</div></div>
+</div></div>
+<div id="counters" style="display:none">
+  <span id="cntNodes">0 Adressen</span><span id="cntEdges">0 Transaktionen</span>
+  <label title="BTC-Beträge an den Kanten anzeigen"><input type="checkbox" id="showLabels" checked> Beträge</label>
+</div>
+
+<div id="legend">
+  <span class="toggle" id="legendToggle">▾</span><b>Legende</b>
+  <div class="body">
+    <div class="row only-explore"><span class="dot" style="background:var(--btc);box-shadow:0 0 0 3px #f7931a55"></span>Startadresse</div>
+    <div class="row only-connect"><span class="dot" style="background:var(--btc);box-shadow:0 0 0 3px #f7931a55"></span>Adresse A (Start)</div>
+    <div class="row only-connect"><span class="dot" style="background:#38bdf8;box-shadow:0 0 0 3px #38bdf855"></span>Adresse B (Ziel)</div>
+    <div class="row only-connect"><span class="dot" style="background:#3b4458;border:2px dashed #ff5d6c"></span>Hub (sehr aktiv, nicht durchsucht)</div>
+    <div class="row"><span class="dot" style="background:var(--blue)"></span>Erweiterte Adresse</div>
+    <div class="row"><span class="dot" style="background:#3b4458;border:1px solid #6b7489"></span>Adresse (klicken zum Erweitern)</div>
+    <div class="row"><span class="dot" style="background:var(--gold)"></span>Neu geschürft (Coinbase)</div>
+    <div class="row"><span class="dot" style="background:var(--violet)"></span>Skript ohne Adresse (z.&nbsp;B. P2PK)</div>
+    <div class="row only-explore"><span class="line" style="border-color:var(--btc)"></span>Transaktion mit Startadresse</div>
+    <div class="row only-connect"><span class="line" style="border-color:var(--btc)"></span>Transaktion auf gefundenem Pfad</div>
+    <div class="row only-connect"><span class="line" style="border-color:#a78bfa;border-top-style:dashed"></span>Gemeinsam in einer Tx („Richtung egal“)</div>
+    <div class="row"><span class="line" style="border-color:var(--teal)"></span>Eingang (Absender → Empfänger)</div>
+    <div class="row"><span class="line" style="border-color:#6b7a99"></span>Ausgang (Sender → Empfänger)</div>
+    <div class="hint">Pfeil = Flussrichtung · Linienstärke ≈ Betrag<br>Mausrad: Zoom · Ziehen: verschieben<br>Knoten ziehen fixiert ihn · Doppelklick löst ihn</div>
+  </div>
+</div>
+
+<aside id="sideWrap">
+  <div id="sheetHandle" role="button" aria-label="Details ein-/ausklappen"><span class="grip"></span><span class="ttl" id="sheetTitle">Details</span>
+    <span class="btns"><button type="button" id="sheetMax" aria-label="Panel maximieren">⤢</button><button type="button" id="sheetToggle" aria-label="Panel ein-/ausklappen">▲</button></span></div>
+  <div id="side"></div>
+</aside>
+<div id="tooltip"></div>
+<div id="toasts"></div>
+
+<script>
+"use strict";
+/* ========================= Konfiguration ========================= */
+const APIS = [
+  { name: "mempool.space",   base: "https://mempool.space/api",   web: "https://mempool.space" },
+  { name: "blockstream.info", base: "https://blockstream.info/api", web: "https://blockstream.info" },
+];
+const WEB = "https://mempool.space";
+const PAGE_SIZE = 25;          // Transaktionen pro Erweiterung
+const MAX_PARTIES = 12;        // max. Absender/Empfänger je Transaktion im Graph
+const MIN_GAP_MS = 450;        // Mindestabstand zwischen API-Anfragen (Drosselung)
+const MAX_RETRIES = 2;
+const EXAMPLES = [
+  ["Genesis-Adresse (Satoshi)", "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"],
+  ["SegWit-Beispiel (bc1q…)", "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"],
+];
+
+/* ========================= Hilfsfunktionen ========================= */
+const $ = s => document.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const nfBtc = new Intl.NumberFormat("de-DE", { minimumFractionDigits: 0, maximumFractionDigits: 8 });
+const nfInt = new Intl.NumberFormat("de-DE");
+const btc = sats => nfBtc.format((sats || 0) / 1e8) + " BTC";
+const btcShort = sats => {
+  const v = (sats || 0) / 1e8;
+  const d = v >= 100 ? 2 : v >= 1 ? 4 : v >= 0.001 ? 5 : 8;
+  return new Intl.NumberFormat("de-DE", { maximumFractionDigits: d }).format(v) + " ₿";
+};
+const shortAddr = a => a.length > 14 ? a.slice(0, 6) + "…" + a.slice(-4) : a;
+const shortTx = t => t.slice(0, 8) + "…" + t.slice(-6);
+const fmtDate = tx => tx.status && tx.status.confirmed && tx.status.block_time
+  ? new Date(tx.status.block_time * 1000).toLocaleString("de-DE", { dateStyle: "medium", timeStyle: "short" })
+  : "unbestätigt (Mempool)";
+const addrUrl = a => `${WEB}/address/${a}`;
+const txUrl = t => `${WEB}/tx/${t}`;
+
+function addrType(a) {
+  const l = a.toLowerCase();
+  if (a.startsWith("1")) return "P2PKH (Legacy)";
+  if (a.startsWith("3")) return "P2SH (Script/Nested SegWit)";
+  if (l.startsWith("bc1q")) return l.length === 42 ? "P2WPKH (Native SegWit)" : "P2WSH (Native SegWit Script)";
+  if (l.startsWith("bc1p")) return "P2TR (Taproot)";
+  return "Unbekannt";
+}
+
+/* Bech32/Bech32m-Prüfsumme (BIP-173/BIP-350) */
+const B32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+function bech32Polymod(values) {
+  const G = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const v of values) { const b = chk >>> 25; chk = ((chk & 0x1ffffff) << 5) ^ v; for (let i = 0; i < 5; i++) if ((b >>> i) & 1) chk ^= G[i]; }
+  return chk >>> 0;
+}
+function bech32Valid(addr) {
+  const a = addr.toLowerCase(), pos = a.lastIndexOf("1");
+  if (pos < 1 || pos + 7 > a.length) return false;
+  const hrp = a.slice(0, pos), data = [];
+  for (const c of a.slice(pos + 1)) { const i = B32.indexOf(c); if (i < 0) return false; data.push(i); }
+  const exp = [...[...hrp].map(c => c.charCodeAt(0) >> 5), 0, ...[...hrp].map(c => c.charCodeAt(0) & 31)];
+  const pm = bech32Polymod([...exp, ...data]);
+  const ver = data[0];
+  return (ver === 0 && pm === 1) || (ver >= 1 && ver <= 16 && pm === 0x2bc830a3);
+}
+function validateAddress(raw) {
+  const a = raw.trim();
+  if (!a) return { ok: false, msg: "Bitte eine Bitcoin-Adresse eingeben." };
+  if (/^(tb1|bcrt1|[mn2])/i.test(a)) return { ok: false, msg: "Testnet-/Regtest-Adressen werden nicht unterstützt – bitte eine Mainnet-Adresse verwenden." };
+  if (/^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(a)) return { ok: true, addr: a };
+  if (/^bc1/i.test(a)) {
+    if (a !== a.toLowerCase() && a !== a.toUpperCase()) return { ok: false, msg: "Ungültige bc1-Adresse (gemischte Groß-/Kleinschreibung)." };
+    const l = a.toLowerCase();
+    if (!/^bc1[ac-hj-np-z02-9]{11,71}$/.test(l) || !bech32Valid(l)) return { ok: false, msg: "Ungültige bc1-Adresse (Prüfsumme oder Zeichen fehlerhaft)." };
+    return { ok: true, addr: l };
+  }
+  return { ok: false, msg: "Ungültige Bitcoin-Adresse. Erlaubt sind Adressen mit 1…, 3…, bc1q… oder bc1p…" };
+}
+
+/* ========================= UI: Toasts & Status ========================= */
+function toast(msg, kind = "info", ms = 5500) {
+  const el = document.createElement("div");
+  el.className = "toast " + kind; el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity .3s"; setTimeout(() => el.remove(), 300); }, ms);
+}
+let pending = 0, statusNote = "";
+function updateStatus() {
+  const s = $("#status");
+  s.classList.toggle("busy", pending > 0);
+  $("#statusText").textContent = pending > 0
+    ? `Lade Daten… (${pending} ${pending === 1 ? "Anfrage" : "Anfragen"})${statusNote ? " · " + statusNote : ""}`
+    : (statusNote || "Bereit");
+}
+
+/* ========================= API mit Drosselung, Retry, Fallback, Cache ========================= */
+class ApiError extends Error { constructor(kind, msg) { super(msg); this.kind = kind; } }
+let chain = Promise.resolve(), nextSlot = 0, preferred = 0;
+function throttled(fn) {
+  const slot = chain.then(async () => {
+    let wait;
+    while ((wait = nextSlot - Date.now()) > 0) await sleep(wait); // nextSlot kann sich bei 429 verschieben
+    nextSlot = Date.now() + MIN_GAP_MS;
+  });
+  chain = slot.catch(() => {});
+  return slot.then(fn);
+}
+const cache = new Map();
+function apiGet(path) {
+  if (cache.has(path)) return cache.get(path);
+  const pr = (async () => {
+    pending++; updateStatus();
+    try {
+      let lastErr = null;
+      const order = [preferred, ...APIS.keys()].filter((v, i, a) => a.indexOf(v) === i);
+      for (const idx of order) {
+        const api = APIS[idx];
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+          let res;
+          try {
+            res = await throttled(() => fetch(api.base + path, { headers: { Accept: "application/json" } }));
+          } catch (e) { lastErr = new ApiError("network", `Netzwerkfehler bei ${api.name}`); break; }
+          if (res.ok) {
+            if (idx !== preferred) { preferred = idx; toast(`Datenquelle gewechselt: ${api.name} wird als Ausweichquelle verwendet.`, "warn"); }
+            statusNote = attempt > 0 ? "" : statusNote;
+            return await res.json();
+          }
+          if (res.status === 429) {
+            const backoff = 2000 * 2 ** attempt;
+            lastErr = new ApiError("rate", `Zu viele Anfragen (HTTP 429) bei ${api.name}.`);
+            statusNote = `Rate-Limit – warte ${Math.round(backoff / 1000)} s`;
+            updateStatus();
+            nextSlot = Math.max(nextSlot, Date.now() + backoff); // globale Pause
+            continue;
+          }
+          if (res.status === 400) {
+            const t = await res.text().catch(() => "");
+            throw new ApiError("invalid", /address/i.test(t) ? "Die API meldet: ungültige Bitcoin-Adresse." : `Ungültige Anfrage: ${t}`);
+          }
+          if (res.status === 404) { throw new ApiError("notfound", "Nicht gefunden (HTTP 404)."); }
+          lastErr = new ApiError("server", `Serverfehler HTTP ${res.status} bei ${api.name}`);
+          break; // nächste Quelle probieren
+        }
+      }
+      throw lastErr || new ApiError("unknown", "Unbekannter Fehler");
+    } finally { pending--; statusNote = ""; updateStatus(); }
+  })();
+  cache.set(path, pr);
+  pr.catch(() => cache.delete(path));
+  return pr;
+}
+function errMsg(e) {
+  if (!(e instanceof ApiError)) return "Fehler: " + (e && e.message || e);
+  if (e.kind === "rate") return "Rate-Limit erreicht: Die API hat zu viele Anfragen abgelehnt (HTTP 429). Bitte kurz warten und erneut versuchen.";
+  if (e.kind === "network") return "Netzwerkfehler: Keine Verbindung zu mempool.space bzw. blockstream.info möglich.";
+  return e.message;
+}
+
+/* ========================= Datenmodell ========================= */
+const nodes = new Map();     // id -> Knoten
+const links = new Map();     // id -> Kante
+const txStore = new Map();   // txid -> Transaktion
+const addrState = new Map(); // addr -> Pagination-Status
+let rootId = null, selected = null; // {type:'node'|'link', id}
+
+function getState(addr) {
+  if (!addrState.has(addr)) addrState.set(addr, { buffer: [], seen: new Set(), processed: [], lastChain: null, started: false, exhausted: false });
+  return addrState.get(addr);
+}
+async function fetchMore(addr) {
+  const st = getState(addr);
+  if (st.exhausted) return;
+  let path;
+  if (!st.started) path = `/address/${addr}/txs`;
+  else path = st.lastChain ? `/address/${addr}/txs/chain/${st.lastChain}` : `/address/${addr}/txs/chain`;
+  const txs = await apiGet(path);
+  const confirmed = txs.filter(t => t.status && t.status.confirmed);
+  if (confirmed.length) st.lastChain = confirmed[confirmed.length - 1].txid;
+  if (confirmed.length < 25) st.exhausted = true;
+  st.started = true;
+  for (const t of txs) if (!st.seen.has(t.txid)) { st.seen.add(t.txid); st.buffer.push(t); }
+}
+async function takeBatch(addr) {
+  const st = getState(addr);
+  if (st.buffer.length < PAGE_SIZE && !st.exhausted) await fetchMore(addr);
+  const batch = st.buffer.splice(0, PAGE_SIZE);
+  st.processed.push(...batch);
+  return batch;
+}
+const hasMore = addr => { const st = getState(addr); return st.buffer.length > 0 || !st.exhausted; };
+
+function ensureNode(id, props, near) {
+  let n = nodes.get(id);
+  if (n) return n;
+  const a = Math.random() * Math.PI * 2, r = 60 + Math.random() * 60;
+  n = Object.assign({ id, expanded: false, loading: false, x: near ? near.x + Math.cos(a) * r : 0, y: near ? near.y + Math.sin(a) * r : 0 }, props);
+  nodes.set(id, n);
+  return n;
+}
+const addrNode = (addr, near) => ensureNode(addr, { kind: "address", addr }, near);
+
+function txTouches(tx, addr) {
+  return tx.vin.some(v => v.prevout && v.prevout.scriptpubkey_address === addr) || tx.vout.some(o => o.scriptpubkey_address === addr);
+}
+function addLink(src, dst, tx, value, dir, extra = {}) {
+  const id = `${tx.txid}|${src.id}|${dst.id}`;
+  if (links.has(id)) return;
+  links.set(id, Object.assign({ id, source: src.id, target: dst.id, txid: tx.txid, value, dir }, extra));
+}
+/** Transaktion aus Sicht der Adresse des Knotens `ctx` in den Graph übernehmen. mode: 'in' | 'both' */
+function addTx(tx, ctx, mode) {
+  txStore.set(tx.txid, tx);
+  const A = ctx.addr;
+  let inSum = 0, outSum = 0;
+  for (const v of tx.vin) if (v.prevout && v.prevout.scriptpubkey_address === A) inSum += v.prevout.value;
+  for (const o of tx.vout) if (o.scriptpubkey_address === A) outSum += o.value;
+  if (inSum > 0) {
+    if (mode === "in") return;
+    // Ausgehend: A -> Empfänger (ohne Wechselgeld an A selbst)
+    const m = new Map();
+    tx.vout.forEach((o, i) => {
+      if (o.scriptpubkey_address === A) return;
+      if (o.scriptpubkey_type === "op_return" || (!o.scriptpubkey_address && !o.value)) return;
+      const key = o.scriptpubkey_address || `script:${tx.txid}:out:${i}`;
+      const e = m.get(key) || { key, addr: o.scriptpubkey_address, type: o.scriptpubkey_type, value: 0 };
+      e.value += o.value; m.set(key, e);
+    });
+    const list = [...m.values()].sort((a, b) => b.value - a.value);
+    list.slice(0, MAX_PARTIES).forEach(e => {
+      const n = e.addr ? addrNode(e.addr, ctx) : ensureNode(e.key, { kind: "script", label: `Ohne Adresse (${e.type || "?"})` }, ctx);
+      addLink(ctx, n, tx, e.value, "out", { truncated: Math.max(0, list.length - MAX_PARTIES) });
+    });
+  } else if (outSum > 0) {
+    // Eingehend: Absender -> A
+    if (tx.vin.some(v => v.is_coinbase)) {
+      const n = ensureNode(`coinbase:${tx.txid}`, { kind: "coinbase", label: "Neu geschürft (Coinbase)" }, ctx);
+      addLink(n, ctx, tx, outSum, "in", { contributed: null });
+      return;
+    }
+    const m = new Map();
+    tx.vin.forEach((v, i) => {
+      const p = v.prevout || {};
+      const key = p.scriptpubkey_address || `script:${tx.txid}:in:${i}`;
+      const e = m.get(key) || { key, addr: p.scriptpubkey_address, type: p.scriptpubkey_type, value: 0 };
+      e.value += p.value || 0; m.set(key, e);
+    });
+    const list = [...m.values()].sort((a, b) => b.value - a.value);
+    list.slice(0, MAX_PARTIES).forEach(e => {
+      const n = e.addr ? addrNode(e.addr, ctx) : ensureNode(e.key, { kind: "script", label: `Ohne Adresse (${e.type || "?"})` }, ctx);
+      addLink(n, ctx, tx, outSum, "in", { contributed: e.value, senders: list.length, truncated: Math.max(0, list.length - MAX_PARTIES) });
+    });
+  }
+}
+
+/* ========================= Aktionen ========================= */
+async function startWith(raw) {
+  const v = validateAddress(raw);
+  const input = $("#addrInput");
+  if (!v.ok) { input.classList.add("invalid"); toast(v.msg, "error"); return; }
+  input.classList.remove("invalid"); input.value = v.addr;
+  if (mode !== "explore") setMode("explore", true);
+  if (location.hash.slice(1) !== v.addr) history.replaceState(null, "", "#" + v.addr);
+  resetGraph();
+  rootId = v.addr;
+  const root = addrNode(v.addr, null);
+  root.root = true; root.x = 0; root.y = 0;
+  $("#empty").style.display = "none"; $("#counters").style.display = "flex";
+  select({ type: "node", id: root.id });
+  update();
+  const ok = await expand(root);
+  if (ok) setTimeout(fitView, 1200);
+  if (ok && links.size === 0) toast("Für diese Adresse wurden (in den geladenen Transaktionen) keine eingehenden Zahlungen gefunden.", "warn");
+}
+
+async function expand(node) {
+  if (!node || node.kind !== "address" || node.loading) return false;
+  if (node.expanded && !hasMore(node.addr)) { toast("Alle Transaktionen dieser Adresse sind bereits geladen.", "info", 3000); return false; }
+  node.loading = true; update(); renderSide();
+  try {
+    const statsP = node.stats ? Promise.resolve(node.stats) : apiGet(`/address/${node.addr}`);
+    const batch = await takeBatch(node.addr);
+    node.stats = await statsP;
+    const txMode = mode === "explore" && node.root && !node.showOut ? "in" : "both";
+    const before = links.size;
+    batch.forEach(tx => addTx(tx, node, txMode));
