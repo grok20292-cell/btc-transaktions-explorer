@@ -1,0 +1,273 @@
+    node.expanded = true;
+    node.loadedTx = getState(node.addr).processed.length;
+    if (!node.root && links.size === before && batch.length) toast(`${shortAddr(node.addr)}: keine neuen Verbindungen in den geladenen Transaktionen.`, "info", 3500);
+    if (!batch.length) toast(`${shortAddr(node.addr)} hat keine Transaktionen.`, "warn");
+    if (nodes.size > 600) toast("Der Graph wird sehr groß – die Darstellung kann langsamer werden.", "warn");
+    return true;
+  } catch (e) {
+    toast(`${shortAddr(node.addr)}: ${errMsg(e)}`, "error", 8000);
+    if (node.root && e.kind === "invalid") $("#addrInput").classList.add("invalid");
+    return false;
+  } finally {
+    node.loading = false; update(); renderSide();
+  }
+}
+function showRootOutgoing() {
+  const r = nodes.get(rootId); if (!r) return;
+  r.showOut = true;
+  const before = links.size;
+  getState(r.addr).processed.forEach(tx => addTx(tx, r, "both"));
+  if (links.size === before) toast("In den bisher geladenen Transaktionen gibt es keine Ausgänge der Startadresse. Mit „Mehr laden“ werden ältere Transaktionen geholt.", "info", 6000);
+  update(); renderSide();
+}
+function resetGraph() {
+  nodes.clear(); links.clear(); rootId = null; selected = null;
+  sim.nodes([]); sim.force("link").links([]);
+  update();
+}
+
+/* ========================= Graph (D3) ========================= */
+const svg = d3.select("#svg");
+const defs = svg.append("defs");
+[["in", "#2bc4a9"], ["out", "#6b7a99"], ["root", "#f7931a"], ["sel", "#ffffff"]].forEach(([k, c]) => {
+  defs.append("marker").attr("id", "arrow-" + k).attr("viewBox", "0 -5 10 10").attr("refX", 8).attr("refY", 0)
+    .attr("markerWidth", 5).attr("markerHeight", 5).attr("orient", "auto").attr("markerUnits", "strokeWidth")
+    .append("path").attr("d", "M0,-4.5L10,0L0,4.5Z").attr("fill", c);
+});
+const glow = defs.append("filter").attr("id", "glow").attr("x", "-80%").attr("y", "-80%").attr("width", "260%").attr("height", "260%");
+glow.append("feGaussianBlur").attr("stdDeviation", 5).attr("result", "b");
+const fm = glow.append("feMerge"); fm.append("feMergeNode").attr("in", "b"); fm.append("feMergeNode").attr("in", "SourceGraphic");
+
+const world = svg.append("g").attr("class", "world");
+const gLinks = world.append("g").attr("class", "links");
+const gNodes = world.append("g").attr("class", "nodes");
+const zoom = d3.zoom().scaleExtent([0.08, 5]).on("zoom", e => world.attr("transform", e.transform));
+svg.call(zoom).on("dblclick.zoom", null);
+svg.on("click", e => { if (e.target === svg.node()) { selected = null; update(); renderSide(); } });
+function centerInitial() {
+  const r = svg.node().getBoundingClientRect();
+  svg.call(zoom.transform, d3.zoomIdentity.translate(r.width / 2, r.height / 2));
+}
+centerInitial();
+
+const radius = n => n.root || n.isB ? 17 : n.hub ? 10 : n.kind === "coinbase" ? 10 : n.kind === "script" ? 7 : n.expanded ? 12 : 8;
+const color = n => n.root ? "#f7931a" : n.isB ? "#38bdf8" : n.kind === "coinbase" ? "#e5c04b" : n.kind === "script" ? "#a78bfa" : n.expanded ? "#4c8dff" : "#3b4458";
+const linkClass = l => l.dir === "co" ? "co" : mode === "connect" ? (l.onPath ? "root" : l.dir) : txStore.get(l.txid) && rootId && txTouches(txStore.get(l.txid), rootId) ? "root" : l.dir;
+const widthScale = v => 1.2 + Math.min(5.5, Math.log10(1 + (v || 0) / 1e5) * 1.4);
+
+const sim = d3.forceSimulation()
+  .force("link", d3.forceLink().id(d => d.id).distance(l => 70 + (radius(l.source) + radius(l.target)) * 2).strength(0.5))
+  .force("charge", d3.forceManyBody().strength(n => n.root ? -900 : n.expanded ? -500 : -220).distanceMax(900))
+  .force("collide", d3.forceCollide().radius(n => radius(n) + 14))
+  .force("x", d3.forceX(0).strength(0.02)).force("y", d3.forceY(0).strength(0.02))
+  .alphaDecay(0.03)
+  .on("tick", ticked);
+
+let linkSel = gLinks.selectAll("g.link"), nodeSel = gNodes.selectAll("g.node");
+
+function pairInfo() {
+  const groups = new Map();
+  for (const l of links.values()) {
+    const s = typeof l.source === "object" ? l.source.id : l.source, t = typeof l.target === "object" ? l.target.id : l.target;
+    const k = s < t ? s + "|" + t : t + "|" + s;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(l);
+  }
+  for (const arr of groups.values()) arr.forEach((l, i) => {
+    const s = typeof l.source === "object" ? l.source.id : l.source;
+    const flip = s > (typeof l.target === "object" ? l.target.id : l.target) ? -1 : 1;
+    l.curve = arr.length === 1 ? 0 : (i - (arr.length - 1) / 2) * Math.min(0.45, 1.2 / arr.length) * flip;
+    // Bei vielen parallelen Kanten nur eine Sammel-Beschriftung anzeigen
+    if (arr.length > 2) {
+      const mid = Math.floor((arr.length - 1) / 2);
+      l.label = i === mid ? `Σ ${btcShort(arr.reduce((s, x) => s + x.value, 0))} (${arr.length} Tx)` : "";
+    } else l.label = btcShort(l.value);
+  });
+}
+
+function update() {
+  pairInfo();
+  const nArr = [...nodes.values()], lArr = [...links.values()];
+  nodeSel = gNodes.selectAll("g.node").data(nArr, d => d.id).join(enter => {
+    const g = enter.append("g").attr("class", "node");
+    g.append("circle").attr("class", "ring");
+    g.append("circle").attr("class", "load");
+    g.append("circle").attr("class", "main");
+    g.append("text").attr("text-anchor", "middle");
+    g.on("click", (e, d) => { e.stopPropagation(); onNodeClick(d); })
+     .on("dblclick", (e, d) => { e.stopPropagation(); d.fx = d.fy = null; d.pinned = false; sim.alpha(0.3).restart(); update(); })
+     .on("mouseenter", (e, d) => { hoverNode(d, true); showTip(e, nodeTip(d)); })
+     .on("mousemove", moveTip)
+     .on("mouseleave", (e, d) => { hoverNode(d, false); hideTip(); })
+     .call(d3.drag()
+        .on("start", (e, d) => { if (!e.active) sim.alphaTarget(0.25).restart(); d.fx = d.x; d.fy = d.y; })
+        .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; d.dragged = true; })
+        .on("end", (e, d) => { if (!e.active) sim.alphaTarget(0); if (d.dragged) { d.pinned = true; d.dragged = false; } else if (!d.pinned) { d.fx = d.fy = null; } update(); }));
+    return g;
+  });
+  nodeSel.attr("class", d => ["node", d.root && "root", d.isB && "target", d.loading && "loading", d.pinned && "pinned",
+      selected && selected.type === "node" && selected.id === d.id && "selected"].filter(Boolean).join(" "))
+    .attr("data-id", d => d.id);
+  nodeSel.select("circle.main").attr("r", radius).attr("fill", color).attr("filter", d => d.root || d.isB ? "url(#glow)" : null)
+    .attr("stroke", d => d.hub ? "#ff5d6c" : d.kind === "address" && !d.expanded && !d.root && !d.isB ? "#6b7489" : null)
+    .attr("stroke-width", d => d.hub ? 2 : d.kind === "address" && !d.expanded && !d.root && !d.isB ? 1.5 : null)
+    .attr("stroke-dasharray", d => d.hub ? "4 3" : null);
+  nodeSel.select("circle.ring").attr("r", d => radius(d) + 6).style("display", d => d.root || d.isB ? null : "none").style("stroke", d => d.isB ? "#38bdf8" : null);
+  nodeSel.select("circle.load").attr("r", d => radius(d) + 4).style("display", d => d.loading ? null : "none");
+  nodeSel.select("text").attr("dy", d => radius(d) + 13).text(d => d.kind === "address" ? (mode === "connect" && d.root ? "A · " : d.isB ? "B · " : "") + shortAddr(d.addr) + (d.hub ? " (Hub)" : "") : d.kind === "coinbase" ? "Coinbase" : "Skript");
+
+  linkSel = gLinks.selectAll("g.link").data(lArr, d => d.id).join(enter => {
+    const g = enter.append("g").attr("class", "link");
+    g.append("path").attr("class", "vis");
+    g.append("path").attr("class", "hit");
+    g.append("text").attr("text-anchor", "middle");
+    g.on("click", (e, d) => { e.stopPropagation(); select({ type: "link", id: d.id }); update(); renderSide(); openSheet(); })
+     .on("mouseenter", (e, d) => showTip(e, linkTip(d))).on("mousemove", moveTip).on("mouseleave", hideTip);
+    return g;
+  });
+  linkSel.attr("class", d => ["link", linkClass(d), selected && selected.type === "link" && selected.id === d.id && "selected"].filter(Boolean).join(" "));
+  linkSel.select("path.vis")
+    .attr("stroke-width", d => widthScale(d.value) * (linkClass(d) === "root" ? 1.5 : 1))
+    .attr("stroke-opacity", d => linkClass(d) === "root" ? 0.95 : 0.6)
+    .attr("marker-end", d => linkClass(d) === "co" ? null : `url(#arrow-${selected && selected.type === "link" && selected.id === d.id ? "sel" : linkClass(d)})`);
+  const showL = $("#showLabels").checked;
+  linkSel.select("text").text(d => showL ? d.label : "");
+
+  sim.nodes(nArr);
+  sim.force("link").links(lArr);
+  sim.alpha(Math.max(sim.alpha(), 0.5)).restart();
+  $("#cntNodes").textContent = `${nfInt.format(nodes.size)} Knoten`;
+  $("#cntEdges").textContent = `${nfInt.format(new Set(lArr.map(l => l.txid)).size)} Transaktionen · ${nfInt.format(lArr.length)} Kanten`;
+  ticked();
+}
+
+function geom(l) {
+  const s = l.source, t = l.target;
+  if (typeof s !== "object" || typeof t !== "object") return null;
+  const dx = t.x - s.x, dy = t.y - s.y, dist = Math.hypot(dx, dy) || 1;
+  const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
+  const cx = mx - dy * (l.curve || 0), cy = my + dx * (l.curve || 0);
+  const u1x = cx - s.x, u1y = cy - s.y, d1 = Math.hypot(u1x, u1y) || 1;
+  const u2x = t.x - cx, u2y = t.y - cy, d2 = Math.hypot(u2x, u2y) || 1;
+  const rs = radius(s) + 2, rt = radius(t) + 5;
+  const sx = s.x + u1x / d1 * rs, sy = s.y + u1y / d1 * rs;
+  const ex = t.x - u2x / d2 * rt, ey = t.y - u2y / d2 * rt;
+  return { sx, sy, cx, cy, ex, ey, lx: 0.25 * s.x + 0.5 * cx + 0.25 * t.x, ly: 0.25 * s.y + 0.5 * cy + 0.25 * t.y, dist };
+}
+function ticked() {
+  linkSel.each(function (l) {
+    const g = geom(l); if (!g) return;
+    const d = `M${g.sx},${g.sy}Q${g.cx},${g.cy} ${g.ex},${g.ey}`;
+    const sel = d3.select(this);
+    sel.selectAll("path").attr("d", d);
+    sel.select("text").attr("x", g.lx).attr("y", g.ly - 3).style("display", g.dist < 70 ? "none" : null);
+  });
+  nodeSel.attr("transform", d => `translate(${d.x},${d.y})`);
+}
+
+function hoverNode(d, on) {
+  const root = gNodes.node().parentNode;
+  d3.select(root).classed("dim", on);
+  if (!on) { nodeSel.classed("nb", false); linkSel.classed("nb", false); applyPathHighlight(); return; }
+  const nb = new Set([d.id]);
+  linkSel.classed("nb", l => { const hit = l.source.id === d.id || l.target.id === d.id; if (hit) { nb.add(l.source.id); nb.add(l.target.id); } return hit; });
+  nodeSel.classed("nb", n => nb.has(n.id));
+}
+
+function fitView() {
+  const arr = [...nodes.values()]; if (!arr.length) return;
+  const r = svg.node().getBoundingClientRect();
+  const xs = arr.map(n => n.x), ys = arr.map(n => n.y);
+  const x0 = Math.min(...xs) - 60, x1 = Math.max(...xs) + 60, y0 = Math.min(...ys) - 60, y1 = Math.max(...ys) + 60;
+  const lg = $("#legend"), padL = lg && !lg.classList.contains("collapsed") && r.width > 900 ? lg.offsetWidth + 20 : 0; // Legende freihalten
+  const w = r.width - padL;
+  // Mobil: geöffnetes Bottom-Sheet verdeckt den unteren Teil – nur sichtbaren Bereich nutzen
+  const sw = $("#sideWrap").getBoundingClientRect();
+  const hVis = isMobile() ? Math.max(120, Math.min(r.height, sw.top - r.top)) : r.height;
+  const k = Math.min(2, 0.95 / Math.max((x1 - x0) / w, (y1 - y0) / hVis));
+  svg.transition().duration(600).call(zoom.transform, d3.zoomIdentity.translate(padL + w / 2, hVis / 2).scale(k).translate(-(x0 + x1) / 2, -(y0 + y1) / 2));
+}
+
+/* ========================= Tooltips ========================= */
+const tip = $("#tooltip");
+function showTip(e, html) { tip.innerHTML = html; tip.style.opacity = 1; moveTip(e); }
+function moveTip(e) {
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = e.clientX + 14, y = e.clientY + 14;
+  if (x + w > innerWidth - 8) x = e.clientX - w - 14;
+  if (y + h > innerHeight - 8) y = e.clientY - h - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+function hideTip() { tip.style.opacity = 0; }
+const row = (k, v) => `<div class="r"><span>${k}</span><span>${v}</span></div>`;
+function nodeTip(d) {
+  if (d.kind === "coinbase") return `<div class="t">Neu geschürft (Coinbase)</div>${row("Transaktion", shortTx(d.id.split(":")[1]))}<div class="muted small">Block-Belohnung – keine Absenderadresse</div>`;
+  if (d.kind === "script") return `<div class="t">${esc(d.label)}</div><div class="muted small">Ausgabe ohne Standard-Adresse</div>`;
+  let h = `<div class="t mono">${esc(d.addr)}</div>${row("Typ", addrType(d.addr))}`;
+  if (d.root) h += row("Rolle", mode === "connect" ? "Adresse A (Start)" : "Startadresse");
+  if (d.isB) h += row("Rolle", "Adresse B (Ziel)");
+  if (d.hub) h += `<div style="color:#ff8a95" class="small">Hub: sehr viele Transaktionen – bei der Suche nicht durchsucht</div>`;
+  if (d.stats) {
+    const c = d.stats.chain_stats, m = d.stats.mempool_stats;
+    h += row("Guthaben", btc(c.funded_txo_sum - c.spent_txo_sum + m.funded_txo_sum - m.spent_txo_sum));
+    h += row("Transaktionen", nfInt.format(c.tx_count + m.tx_count));
+  }
+  if (mode === "connect" && !d.expanded) h += `<div class="muted small" style="margin-top:4px">Klicken für Details</div>`; else
+  h += `<div class="muted small" style="margin-top:4px">${d.loading ? "Wird geladen…" : d.expanded ? (hasMore(d.addr) ? "Klicken: weitere Transaktionen laden" : "Vollständig geladen") : "Klicken zum Erweitern"}</div>`;
+  return h;
+}
+function linkTip(l) {
+  const tx = txStore.get(l.txid);
+  const from = l.source.kind === "address" ? shortAddr(l.source.addr) : l.source.kind === "coinbase" ? "Coinbase" : "Skript";
+  const to = l.target.kind === "address" ? shortAddr(l.target.addr) : "Skript";
+  let h = `<div class="t">${esc(from)} → ${esc(to)}</div>`;
+  h += row("Betrag", `<b>${btc(l.value)}</b>`);
+  if (l.dir === "in" && l.contributed != null && l.senders > 1) h += row("Input dieses Absenders", btc(l.contributed));
+  if (l.senders > 1) h += row("Absender in Tx", nfInt.format(l.senders));
+  h += row("Datum", fmtDate(tx));
+  h += row("TxID", `<span class="mono">${shortTx(l.txid)}</span>`);
+  if (linkClass(l) === "root") h += `<div style="color:var(--btc2);margin-top:4px" class="small">● Betrifft die Startadresse</div>`;
+  return h;
+}
+
+/* ========================= Seitenpanel ========================= */
+function select(s) { selected = s; }
+async function onNodeClick(d) {
+  select({ type: "node", id: d.id }); update(); renderSide(); openSheet();
+  if (mode === "explore" && d.kind === "address" && !d.expanded) { await expand(d); }
+}
+function renderSide() {
+  const side = $("#side");
+  if (mode === "connect") { renderConnectSide(); return; }
+  if (!rootId) { side.innerHTML = welcomeHtml(); bindExamples(); return; }
+  if (selected && selected.type === "link" && links.has(selected.id)) { side.innerHTML = txHtml(links.get(selected.id)); bindSide(); return; }
+  const n = selected && selected.type === "node" && nodes.get(selected.id) || nodes.get(rootId);
+  side.innerHTML = nodeHtml(n); bindSide();
+}
+function welcomeHtml() {
+  return `<h2>Willkommen</h2><div class="welcome">
+  <p>Gib oben eine Bitcoin-Adresse ein. Der Explorer zeigt die <b>eingehenden Transaktionen</b> und deren <b>Absender</b> als Graph.</p>
+  <p>Klicke auf einen Absender-Knoten, um dessen <b>ein- und ausgehende</b> Transaktionen nachzuladen und den Geldfluss weiterzuverfolgen.</p>
+  <p>Transaktionen, an denen die Startadresse beteiligt ist, sind <span style="color:var(--btc2)">orange</span> hervorgehoben.</p>
+  <h3>Beispiele</h3><div class="examples">${EXAMPLES.map(([l, a]) => `<button data-ex="${a}">${esc(l)}</button>`).join("")}</div>
+  <h3>Datenschutz</h3><p class="small">Abfragen werden direkt aus deinem Browser an mempool.space (Ausweichquelle: blockstream.info) gesendet. Diese Dienste sehen deine IP-Adresse und die abgefragten Adressen.</p></div>`;
+}
+function bindExamples() { document.querySelectorAll("[data-ex]").forEach(b => b.onclick = () => { $("#addrInput").value = b.dataset.ex; startWith(b.dataset.ex); }); }
+
+function relatedTxs(n) {
+  const ids = new Set();
+  for (const l of links.values()) if (l.source.id === n.id || l.target.id === n.id) ids.add(l.txid);
+  return [...ids].map(id => txStore.get(id)).sort((a, b) => (b.status.block_time || 9e12) - (a.status.block_time || 9e12));
+}
+function nodeHtml(n) {
+  if (!n) return "";
+  if (n.kind === "coinbase") {
+    const txid = n.id.split(":")[1], tx = txStore.get(txid);
+    return `<h2>⛏️ Neu geschürft (Coinbase)</h2><div class="card small">Diese Bitcoins stammen aus einer Block-Belohnung (Coinbase-Transaktion) und haben daher keine Absenderadresse.
+      <div class="kv" style="margin-top:10px"><div>Block</div><div>${tx && tx.status.block_height != null ? nfInt.format(tx.status.block_height) : "–"}</div><div>Datum</div><div>${tx ? fmtDate(tx) : "–"}</div></div>
+      <div class="btnrow"><a href="${txUrl(txid)}" target="_blank" rel="noopener">Transaktion auf mempool.space ↗</a></div></div>`;
+  }
+  if (n.kind === "script") return `<h2>${esc(n.label)}</h2><div class="card small">Diese Ein-/Ausgabe verwendet ein Skript ohne Standard-Adresse (z.&nbsp;B. frühe Pay-to-Public-Key-Ausgaben). Sie kann nicht weiter erweitert werden.</div>`;
+  const st = getState(n.addr);
+  let h = mode === "connect" ? `<div class="btnrow" style="margin:0 0 12px"><button data-act="backpaths">← Zur Pfadliste</button></div>` : "";
+  h += `<h2>${mode === "connect" && n.root ? '<span class="badge root">A · Start</span>' : n.isB ? '<span class="badge" style="background:#38bdf826;color:#7dd3fc">B · Ziel</span>' : n.hub ? '<span class="badge out">Hub</span>' : n.root ? '<span class="badge root">Startadresse</span>' : n.expanded ? '<span class="badge">Erweitert</span>' : '<span class="badge">Nicht erweitert</span>'} Adresse</h2>`;
