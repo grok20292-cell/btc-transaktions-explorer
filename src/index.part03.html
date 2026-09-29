@@ -1,0 +1,284 @@
+  h += `<div class="full mono">${esc(n.addr)}</div>`;
+  h += `<div class="card"><div class="kv"><div>Typ</div><div>${addrType(n.addr)}</div>`;
+  if (n.stats) {
+    const c = n.stats.chain_stats, m = n.stats.mempool_stats;
+    h += `<div>Guthaben</div><div><b>${btc(c.funded_txo_sum - c.spent_txo_sum + m.funded_txo_sum - m.spent_txo_sum)}</b></div>
+      <div>Gesamt empfangen</div><div>${btc(c.funded_txo_sum + m.funded_txo_sum)}</div>
+      <div>Gesamt gesendet</div><div>${btc(c.spent_txo_sum + m.spent_txo_sum)}</div>
+      <div>Transaktionen</div><div>${nfInt.format(c.tx_count)}${m.tx_count ? ` <span class="badge unc">+${m.tx_count} unbestätigt</span>` : ""}</div>
+      <div>Geladen</div><div>${nfInt.format(st.processed.length)}</div>`;
+  }
+  h += `</div><div class="btnrow">`;
+  if (n.loading) h += `<button disabled><span class="spinner" style="display:inline-block;vertical-align:-2px"></span> Lädt…</button>`;
+  else if (!n.expanded) h += `<button class="primary" data-act="expand">${mode === "connect" ? "Hier erweitern" : "Erweitern"} (${PAGE_SIZE} Tx)</button>`;
+  else if (hasMore(n.addr)) h += `<button class="primary" data-act="expand">Mehr laden (+${PAGE_SIZE})</button>`;
+  else if (n.expanded) h += `<span class="muted small">Alle Transaktionen geladen.</span>`;
+  if (mode === "connect") h += `<button data-act="toexplore" title="Diese Adresse im Explorer-Modus als Startadresse öffnen">Im Explorer öffnen</button>`;
+  if (mode === "explore" && n.root && n.expanded && !n.showOut) h += `<button data-act="rootout" title="Auch Ausgänge der Startadresse anzeigen">Ausgehende anzeigen</button>`;
+  h += `</div><div class="btnrow small"><a href="${addrUrl(n.addr)}" target="_blank" rel="noopener">Auf mempool.space öffnen ↗</a>
+     ${n.root || mode === "connect" ? "" : `<a href="#" data-act="newroot">Als Startadresse verwenden</a>`}</div></div>`;
+  const txs = relatedTxs(n);
+  if (txs.length) {
+    h += `<h3>Transaktionen im Graph (${txs.length})</h3><ul class="txlist">`;
+    for (const tx of txs.slice(0, 150)) {
+      let net = 0;
+      for (const v of tx.vin) if (v.prevout && v.prevout.scriptpubkey_address === n.addr) net -= v.prevout.value;
+      for (const o of tx.vout) if (o.scriptpubkey_address === n.addr) net += o.value;
+      const hl = rootId && txTouches(tx, rootId);
+      h += `<li data-tx="${tx.txid}" class="${hl ? "hl" : ""}"><span><span class="mono">${shortTx(tx.txid)}</span><br><span class="muted">${fmtDate(tx)}</span></span>
+        <span style="text-align:right"><span class="badge ${net >= 0 ? "in" : "out"}">${net >= 0 ? "Eingang" : "Ausgang"}</span><br>${net >= 0 ? "+" : "−"}${btc(Math.abs(net))}</span></li>`;
+    }
+    h += `</ul>`;
+  } else if (n.expanded) h += `<p class="muted small">Keine Verbindungen im Graph.</p>`;
+  else if (!n.loading) h += `<p class="muted small">Klicke auf den Knoten oder „Erweitern“, um die Transaktionen dieser Adresse zu laden.</p>`;
+  return h;
+}
+function ioList(items, isIn, focus) {
+  const max = 20;
+  let h = `<ul class="io">`;
+  items.slice(0, max).forEach(it => {
+    const a = isIn ? (it.is_coinbase ? null : it.prevout && it.prevout.scriptpubkey_address) : it.scriptpubkey_address;
+    const val = isIn ? (it.prevout ? it.prevout.value : 0) : it.value;
+    const label = isIn && it.is_coinbase ? "Neu geschürft (Coinbase)" : a ? `<a href="${addrUrl(a)}" target="_blank" rel="noopener" class="mono">${shortAddr(a)}</a>` : `<span class="muted">${esc((isIn ? it.prevout && it.prevout.scriptpubkey_type : it.scriptpubkey_type) || "?")}</span>`;
+    const me = a && (a === rootId || a === focus);
+    h += `<li class="${me ? "me" : ""}"><span>${label}${a === rootId ? " ★" : ""}</span><span class="amt">${btc(val)}</span></li>`;
+  });
+  if (items.length > max) h += `<li class="muted">… und ${items.length - max} weitere</li>`;
+  return h + `</ul>`;
+}
+function txHtml(l) {
+  const tx = txStore.get(l.txid);
+  const hl = rootId && txTouches(tx, rootId);
+  const totalOut = tx.vout.reduce((s, o) => s + o.value, 0);
+  const focus = l.dir === "in" ? l.target.addr : l.source.addr;
+  let h = mode === "connect" ? `<div class="btnrow" style="margin:0 0 12px"><button data-act="backpaths">← Zur Pfadliste</button></div>` : "";
+  h += `<h2>Transaktion ${mode === "explore" && hl ? '<span class="badge root">mit Startadresse</span>' : l.onPath ? '<span class="badge root">auf Pfad</span>' : ""}</h2><div class="full mono">${tx.txid}</div>`;
+  h += `<div class="card"><div class="kv">
+    <div>Kante</div><div>${l.source.kind === "address" ? `<span class="mono">${shortAddr(l.source.addr)}</span>` : esc(l.source.label)} → ${l.target.kind === "address" ? `<span class="mono">${shortAddr(l.target.addr)}</span>` : esc(l.target.label)}</div>
+    <div>Betrag (Kante)</div><div><b>${btc(l.value)}</b></div>
+    <div>Datum</div><div>${fmtDate(tx)}</div>
+    <div>Block</div><div>${tx.status.confirmed ? nfInt.format(tx.status.block_height) : '<span class="badge unc">unbestätigt</span>'}</div>
+    <div>Summe Ausgaben</div><div>${btc(totalOut)}</div>
+    <div>Gebühr</div><div>${btc(tx.fee)}${tx.weight ? ` <span class="muted">(${(tx.fee / (tx.weight / 4)).toFixed(1).replace(".", ",")} sat/vB)</span>` : ""}</div>
+    <div>Inputs / Outputs</div><div>${tx.vin.length} / ${tx.vout.length}</div></div>
+    ${l.truncated ? `<p class="small muted">Hinweis: ${l.truncated} weitere Beteiligte wurden im Graph ausgeblendet (max. ${MAX_PARTIES} je Transaktion).</p>` : ""}
+    <div class="btnrow small"><a href="${txUrl(tx.txid)}" target="_blank" rel="noopener">Transaktion auf mempool.space ↗</a></div></div>`;
+  h += `<h3>Eingänge (${tx.vin.length})</h3><div class="card">${ioList(tx.vin, true, focus)}</div>`;
+  h += `<h3>Ausgänge (${tx.vout.length})</h3><div class="card">${ioList(tx.vout, false, focus)}</div>`;
+  h += `<div class="btnrow"><button data-act="gonode" data-id="${esc(l.source.id)}">Absender anzeigen</button><button data-act="gonode" data-id="${esc(l.target.id)}">Empfänger anzeigen</button></div>`;
+  return h;
+}
+function bindSide() {
+  const side = $("#side");
+  side.querySelectorAll("[data-act]").forEach(b => b.onclick = async e => {
+    e.preventDefault();
+    const act = b.dataset.act;
+    const n = selected && selected.type === "node" ? nodes.get(selected.id) : nodes.get(rootId);
+    if (act === "expand" && mode === "connect") { await expand(n); applyPathHighlight(); }
+    else if (act === "expand") await expand(n);
+    else if (act === "rootout") showRootOutgoing();
+    else if (act === "newroot") { $("#addrInput").value = n.addr; startWith(n.addr); }
+    else if (act === "toexplore") { $("#addrInput").value = n.addr; startWith(n.addr); }
+    else if (act === "backpaths") { selected = null; update(); renderSide(); }
+    else if (act === "gonode") { select({ type: "node", id: b.dataset.id }); update(); renderSide(); }
+  });
+  side.querySelectorAll("[data-tx]").forEach(li => li.onclick = () => {
+    const n = nodes.get(selected && selected.type === "node" ? selected.id : rootId);
+    const l = [...links.values()].find(l => l.txid === li.dataset.tx && (l.source.id === n.id || l.target.id === n.id)) || [...links.values()].find(l => l.txid === li.dataset.tx);
+    if (l) { select({ type: "link", id: l.id }); update(); renderSide(); }
+  });
+}
+
+
+/* ========================= Modus „Verbindung suchen“ ========================= */
+let mode = "explore";
+let pathHL = null; // {nodes:Set, links:Set}
+const conn = {
+  opts: { hops: 3, budget: 150, maxTx: 25, hub: 1000, undirected: false, longer: false },
+  running: false, S: null, result: null, activePath: null,
+};
+const MAX_PATHS = 30, MAX_TX_PER_HOP = 3, MAX_NEIGHBORS_PER_TX = 200, CONCURRENCY = 3;
+
+function setMode(m, silent) {
+  if (m === mode) return;
+  if (mode === "connect") cancelSearch();
+  mode = m;
+  document.body.classList.toggle("connect", m === "connect");
+  $("#tabExplore").classList.toggle("active", m === "explore");
+  $("#tabConnect").classList.toggle("active", m === "connect");
+  resetGraph(); pathHL = null; conn.result = null; conn.activePath = null;
+  $("#empty").style.display = ""; $("#counters").style.display = "none";
+  centerInitial();
+  if (!silent) history.replaceState(null, "", location.pathname + location.search);
+  renderSide();
+}
+
+function applyPathHighlight() {
+  const w = d3.select(gNodes.node().parentNode);
+  if (!pathHL) { w.classed("dim", false); nodeSel.classed("nb", false); linkSel.classed("nb", false); return; }
+  w.classed("dim", true);
+  nodeSel.classed("nb", n => pathHL.nodes.has(n.id));
+  linkSel.classed("nb", l => pathHL.links.has(l.id));
+}
+
+/** Transaktionen einer Adresse laden (bis maxTx), vorher Statistik für Hub-Erkennung. */
+async function loadForSearch(addr, S) {
+  const stats = await apiGet(`/address/${addr}`);
+  const total = stats.chain_stats.tx_count + stats.mempool_stats.tx_count;
+  const isEnd = addr === S.A || addr === S.B;
+  if (total > S.opts.hub && !isEnd) return { stats, hub: true, txs: [] };
+  let txs = await apiGet(`/address/${addr}/txs`);
+  let all = [...txs];
+  let conf = txs.filter(t => t.status.confirmed);
+  while (all.length < S.opts.maxTx && conf.length === 25 && !S.cancelled) {
+    const last = conf[conf.length - 1].txid;
+    const more = await apiGet(`/address/${addr}/txs/chain/${last}`);
+    all.push(...more); conf = more;
+    if (more.length < 25) break;
+  }
+  return { stats, hub: false, txs: all.slice(0, S.opts.maxTx) };
+}
+
+function groupAddrs(list, getAddr, getVal) {
+  const m = new Map();
+  for (const it of list) { const a = getAddr(it); if (!a) continue; m.set(a, (m.get(a) || 0) + (getVal(it) || 0)); }
+  return m;
+}
+/** Nachbarn einer Adresse in einer Suchrichtung. side: 'F' (vorwärts: A gibt aus) | 'B' (rückwärts: zahlte an B) */
+function neighborsOf(x, txs, side, undirected) {
+  const res = [];
+  for (const tx of txs) {
+    const ins = groupAddrs(tx.vin, v => v.prevout && v.prevout.scriptpubkey_address, v => v.prevout && v.prevout.value);
+    const outs = groupAddrs(tx.vout, o => o.scriptpubkey_address, o => o.value);
+    const xIn = ins.has(x), xOut = outs.has(x);
+    const push = (y, from, to, value, kind) => { if (y !== x && res.length < 100000) res.push({ y, from, to, value, kind, tx }); };
+    let n = 0;
+    if (!undirected) {
+      if (side === "F" && xIn) for (const [y, v] of outs) { if (n++ > MAX_NEIGHBORS_PER_TX) break; push(y, x, y, v, "flow"); }
+      if (side === "B" && xOut && !xIn) for (const [y, v] of ins) { if (n++ > MAX_NEIGHBORS_PER_TX) break; push(y, y, x, outs.get(x), "flow"); }
+    } else if (xIn) {
+      for (const [y, v] of outs) { if (n++ > MAX_NEIGHBORS_PER_TX) break; if (!ins.has(y)) push(y, x, y, v, "flow"); }
+      for (const [y, v] of ins) { if (n++ > MAX_NEIGHBORS_PER_TX) break; push(y, y, x, v, "co"); }
+    } else if (xOut) {
+      for (const [y, v] of ins) { if (n++ > MAX_NEIGHBORS_PER_TX) break; push(y, y, x, outs.get(x), "flow"); }
+      for (const [y, v] of outs) { if (n++ > MAX_NEIGHBORS_PER_TX) break; if (!ins.has(y)) push(y, x, y, v, "co"); }
+    }
+  }
+  return res;
+}
+
+function cancelSearch() { if (conn.S && conn.running) { conn.S.cancelled = true; if (conn.S.onCancel) conn.S.onCancel(); } }
+
+async function startConnect() {
+  const a = validateAddress($("#addrA").value), b = validateAddress($("#addrB").value);
+  $("#addrA").classList.toggle("invalid", !a.ok); $("#addrB").classList.toggle("invalid", !b.ok);
+  if (!a.ok) { toast("Adresse A: " + a.msg, "error"); return; }
+  if (!b.ok) { toast("Adresse B: " + b.msg, "error"); return; }
+  if (a.addr === b.addr) { toast("A und B sind identisch – bitte zwei verschiedene Adressen eingeben.", "error"); return; }
+  if (conn.running) { cancelSearch(); await sleep(50); }
+  readOpts();
+  $("#addrA").value = a.addr; $("#addrB").value = b.addr;
+  const o = conn.opts;
+  const hash = `#verbindung=${a.addr},${b.addr}&hops=${o.hops}&budget=${o.budget}&maxTx=${o.maxTx}&hub=${o.hub}&undirected=${o.undirected ? 1 : 0}&longer=${o.longer ? 1 : 0}`;
+  if (location.hash !== hash) history.replaceState(null, "", hash);
+  resetGraph(); pathHL = null; conn.result = null; conn.activePath = null;
+  $("#empty").style.display = "none";
+  const S = conn.S = {
+    A: a.addr, B: b.addr, opts: { ...o }, cancelled: false, budgetHit: false, started: Date.now(),
+    distF: new Map([[a.addr, 0]]), distB: new Map([[b.addr, 0]]), parF: new Map(), parB: new Map(),
+    frontF: [a.addr], frontB: [b.addr], levelsF: 0, levelsB: 0, queried: 0, current: new Set(),
+    hubs: new Set(), info: new Map(), edges: new Map(), meets: new Set(), errors: 0, reason: "",
+  };
+  conn.running = true; renderSide(); openSheet();
+  const tick = setInterval(updateProgress, 500);
+  try {
+    const cancelled = new Promise(res => { S.onCancel = res; });
+    await Promise.race([bfs(S), cancelled]); // Abbruch sofort; laufende Anfragen werden verworfen
+    if (S.cancelled) S.reason = "cancelled";
+  } catch (e) { toast(errMsg(e), "error", 8000); S.reason = "error"; }
+  finally { clearInterval(tick); if (conn.S === S) conn.running = false; }
+  if (conn.S !== S || mode !== "connect") return; // Suche wurde ersetzt oder Modus gewechselt
+  finishSearch(S);
+}
+
+async function bfs(S) {
+  const maxEdges = S.opts.hops + 1;
+  while (S.levelsF + S.levelsB < maxEdges) {
+    if (S.cancelled) { S.reason = "cancelled"; return; }
+    if (S.queried >= S.opts.budget) { S.budgetHit = true; S.reason = "budget"; return; }
+    const expF = S.frontF.filter(x => !S.hubs.has(x)), expB = S.frontB.filter(x => !S.hubs.has(x));
+    if (!expF.length && !expB.length) { S.reason = "exhausted"; return; }
+    const side = !expB.length ? "F" : !expF.length ? "B" : (expF.length <= expB.length ? "F" : "B");
+    await expandLevel(S, side);
+    if (S.cancelled) { S.reason = "cancelled"; return; }
+    if (S.meets.size && !S.opts.longer) { S.reason = "found"; return; }
+    if (countPaths(S) >= MAX_PATHS) { S.reason = "maxpaths"; return; }
+  }
+  S.reason = S.reason || "depth";
+}
+
+async function expandLevel(S, side) {
+  const F = side === "F";
+  const front = F ? S.frontF : S.frontB;
+  const dist = F ? S.distF : S.distB, other = F ? S.distB : S.distF, par = F ? S.parF : S.parB;
+  const d = F ? S.levelsF : S.levelsB;
+  const next = [];
+  const queue = front.filter(x => !S.hubs.has(x));
+  let aborted = false;
+  async function worker() {
+    while (queue.length) {
+      if (S.cancelled) return;
+      if (S.queried >= S.opts.budget) { S.budgetHit = true; aborted = true; return; }
+      const x = queue.shift();
+      S.queried++; S.current.add(x); updateProgress();
+      let data;
+      try { data = await loadForSearch(x, S); }
+      catch (e) {
+        S.errors++; S.current.delete(x);
+        if (e.kind === "rate" || e.kind === "network") { toast(errMsg(e), "error", 6000); }
+        continue;
+      }
+      S.current.delete(x);
+      S.info.set(x, data.stats);
+      if (data.hub) { S.hubs.add(x); continue; }
+      for (const nb of neighborsOf(x, data.txs, side, S.opts.undirected)) {
+        txStore.set(nb.tx.txid, nb.tx);
+        const k = nb.from < nb.to ? nb.from + "|" + nb.to : nb.to + "|" + nb.from;
+        if (!S.edges.has(k)) S.edges.set(k, new Map());
+        const em = S.edges.get(k);
+        const ek = nb.tx.txid + nb.from + nb.to;
+        if (!em.has(ek)) em.set(ek, { from: nb.from, to: nb.to, txid: nb.tx.txid, value: nb.value, kind: nb.kind, time: nb.tx.status.block_time || 9e12 });
+        const y = nb.y;
+        if (!dist.has(y)) { dist.set(y, d + 1); par.set(y, new Set([x])); next.push(y); }
+        else if (dist.get(y) === d + 1) par.get(y).add(x);
+        if (other.has(y)) S.meets.add(y);
+      }
+      if (other.has(x)) S.meets.add(x);
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  if (F) { S.frontF = next; S.levelsF++; } else { S.frontB = next; S.levelsB++; }
+  if (aborted) S.budgetHit = true;
+}
+
+/** Alle Ketten vom Knoten m zurück zur Wurzel über die Eltern-Map (nur kürzeste Eltern). */
+function chains(m, par, root, cap = 200) {
+  if (m === root) return [[root]];
+  const out = [];
+  const ps = par.get(m); if (!ps) return out;
+  for (const p of ps) {
+    for (const c of chains(p, par, root, cap)) { out.push([...c, m]); if (out.length >= cap) return out; }
+  }
+  return out;
+}
+function buildPaths(S) {
+  const maxEdges = S.opts.hops + 1, seen = new Set(), paths = [];
+  const meets = [...S.meets].sort((a, b) => (S.distF.get(a) + S.distB.get(a)) - (S.distF.get(b) + S.distB.get(b)));
+  for (const m of meets) {
+    if (S.distF.get(m) + S.distB.get(m) > maxEdges) continue;
+    const fw = chains(m, S.parF, S.A), bw = chains(m, S.parB, S.B).map(c => c.reverse());
+    for (const f of fw) for (const b of bw) {
+      const p = [...f, ...b.slice(1)];
+      if (new Set(p).size !== p.length) continue; // keine Schleifen
+      const key = p.join(">");
+      if (seen.has(key)) continue;
