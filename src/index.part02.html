@@ -31,7 +31,7 @@ const svg = d3.select("#svg");
 const defs = svg.append("defs");
 [["in", "#2bc4a9"], ["out", "#6b7a99"], ["root", "#f7931a"], ["sel", "#ffffff"]].forEach(([k, c]) => {
   defs.append("marker").attr("id", "arrow-" + k).attr("viewBox", "0 -5 10 10").attr("refX", 8).attr("refY", 0)
-    .attr("markerWidth", 5).attr("markerHeight", 5).attr("orient", "auto").attr("markerUnits", "strokeWidth")
+    .attr("markerWidth", 11).attr("markerHeight", 11).attr("orient", "auto").attr("markerUnits", "userSpaceOnUse")
     .append("path").attr("d", "M0,-4.5L10,0L0,4.5Z").attr("fill", c);
 });
 const glow = defs.append("filter").attr("id", "glow").attr("x", "-80%").attr("y", "-80%").attr("width", "260%").attr("height", "260%");
