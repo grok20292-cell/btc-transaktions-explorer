@@ -102,8 +102,16 @@ function bech32Valid(addr) {
   const ver = data[0];
   return (ver === 0 && pm === 1) || (ver >= 1 && ver <= 16 && pm === 0x2bc830a3);
 }
+/** Eingabe säubern: Leer-/Zeilenumbruch-/unsichtbare Zeichen entfernen, „bitcoin:“-URI auflösen. */
+function normalizeInput(raw) {
+  let a = String(raw || "").replace(/[\s\u00a0\u200b-\u200f\u2028\u2029\u2060\ufeff]+/g, "");
+  a = a.replace(/^bitcoin:/i, "").split(/[?#]/)[0];
+  // iOS schreibt den ersten Buchstaben oft groß („Bc1q…“) – bc1-Adressen sind nicht case-sensitiv
+  if (/^bc1/i.test(a) && a !== a.toUpperCase()) a = a.toLowerCase();
+  return a;
+}
 function validateAddress(raw) {
-  const a = raw.trim();
+  const a = normalizeInput(raw);
   if (!a) return { ok: false, msg: "Bitte eine Bitcoin-Adresse eingeben." };
   if (/^(tb1|bcrt1|[mn2])/i.test(a)) return { ok: false, msg: "Testnet-/Regtest-Adressen werden nicht unterstützt – bitte eine Mainnet-Adresse verwenden." };
   if (/^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(a)) return { ok: true, addr: a };
@@ -158,7 +166,14 @@ function apiGet(path) {
           let res;
           try {
             res = await throttled(() => fetch(api.base + path, { headers: { Accept: "application/json" } }));
-          } catch (e) { lastErr = new ApiError("network", `Netzwerkfehler bei ${api.name}`); break; }
+          } catch (e) {
+            // Ein HTTP 429 ohne CORS-Header erscheint im Browser als Netzwerkfehler – kurz warten und einmal wiederholen
+            lastErr = new ApiError("network", `Netzwerkfehler bei ${api.name}`);
+            if (attempt >= 1) break;
+            statusNote = `${api.name} antwortet nicht – neuer Versuch`; updateStatus();
+            nextSlot = Math.max(nextSlot, Date.now() + 2500);
+            continue;
+          }
           if (res.ok) {
             if (idx !== preferred) { preferred = idx; toast(`Datenquelle gewechselt: ${api.name} wird als Ausweichquelle verwendet.`, "warn"); }
             statusNote = attempt > 0 ? "" : statusNote;
@@ -191,7 +206,7 @@ function apiGet(path) {
 function errMsg(e) {
   if (!(e instanceof ApiError)) return "Fehler: " + (e && e.message || e);
   if (e.kind === "rate") return "Rate-Limit erreicht: Die API hat zu viele Anfragen abgelehnt (HTTP 429). Bitte kurz warten und erneut versuchen.";
-  if (e.kind === "network") return "Netzwerkfehler: Keine Verbindung zu mempool.space bzw. blockstream.info möglich.";
+  if (e.kind === "network") return "Keine Antwort von mempool.space bzw. blockstream.info (Netzwerkproblem, Rate-Limit oder Content-Blocker). Bitte kurz warten und erneut versuchen.";
   return e.message;
 }
 
@@ -317,6 +332,7 @@ async function expand(node) {
   node.loading = true; update(); renderSide();
   try {
     const statsP = node.stats ? Promise.resolve(node.stats) : apiGet(`/address/${node.addr}`);
+    statsP.catch(() => {}); // Fehler wird unten beim await behandelt
     const batch = await takeBatch(node.addr);
     node.stats = await statsP;
     const txMode = mode === "explore" && node.root && !node.showOut ? "in" : "both";
