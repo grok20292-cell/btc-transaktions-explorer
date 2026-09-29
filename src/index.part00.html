@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e131d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="BTC-Explorer">
+<meta name="description" content="Bitcoin-Transaktionen als interaktiven Graphen erkunden und Verbindungen zwischen Adressen finden.">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>Bitcoin Transaktions-Explorer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ccircle cx=%2250%22 cy=%2250%22 r=%2248%22 fill=%22%23f7931a%22/%3E%3Ctext x=%2250%22 y=%2270%22 font-size=%2260%22 text-anchor=%22middle%22 fill=%22white%22 font-family=%22sans-serif%22%3E%E2%82%BF%3C/text%3E%3C/svg%3E">
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<style>
+  :root{
+    --hdr:64px; --sheet-min:56px;
+    --bg:#0b0e14; --panel:#121722; --panel2:#171d2b; --border:#242c3d; --text:#e6e9ef; --muted:#8b93a7;
+    --btc:#f7931a; --btc2:#ffb347; --blue:#4c8dff; --teal:#2bc4a9; --gray:#6b7489; --gold:#e5c04b;
+    --red:#ff5d6c; --violet:#a78bfa;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,sans-serif;overflow:hidden}
+  a{color:var(--btc2);text-decoration:none} a:hover{text-decoration:underline}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+  header{position:fixed;top:0;left:0;right:0;min-height:64px;padding-top:env(safe-area-inset-top);display:flex;align-items:center;gap:16px;padding:0 18px;
+    background:linear-gradient(180deg,#121826,#0e131d);border-bottom:1px solid var(--border);z-index:20}
+  .brand{display:flex;align-items:center;gap:10px;white-space:nowrap}
+  .logo{width:34px;height:34px;border-radius:50%;background:var(--btc);display:grid;place-items:center;font-weight:800;color:#fff;font-size:20px;box-shadow:0 0 18px #f7931a66}
+  .brand h1{font-size:17px;margin:0;font-weight:650;letter-spacing:.2px}
+  .brand small{display:block;color:var(--muted);font-size:11px;font-weight:400}
+  form#searchForm{flex:1;display:flex;gap:8px;max-width:760px}
+  #addrInput{flex:1;background:#0b0f18;border:1px solid var(--border);color:var(--text);border-radius:10px;padding:10px 14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;outline:none;transition:border .15s,box-shadow .15s}
+  #addrInput:focus{border-color:var(--btc);box-shadow:0 0 0 3px #f7931a33}
+  #addrInput.invalid{border-color:var(--red);box-shadow:0 0 0 3px #ff5d6c33}
+  button{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:9px 14px;cursor:pointer;font:inherit;font-size:13px;transition:background .15s,border .15s,opacity .15s;white-space:nowrap}
+  button:hover{background:#1f2738;border-color:#34405a}
+  button.primary{background:var(--btc);border-color:var(--btc);color:#1a1004;font-weight:650}
+  button.primary:hover{background:var(--btc2)}
+  button:disabled{opacity:.5;cursor:default}
+  .hdr-tools{display:flex;gap:8px;margin-left:auto}
+  #status{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;min-width:150px;justify-content:flex-end}
+  .spinner{width:14px;height:14px;border:2px solid #ffffff22;border-top-color:var(--btc);border-radius:50%;animation:spin .8s linear infinite;display:none}
+  .busy .spinner{display:inline-block}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  #graph{position:fixed;top:var(--hdr);left:0;right:380px;bottom:0;background:
+    radial-gradient(circle at 50% 40%,#131a29 0%,#0b0e14 70%);}
+  #graph svg{width:100%;height:100%;display:block;cursor:grab}
+  #graph svg:active{cursor:grabbing}
+  #sideWrap{position:fixed;top:var(--hdr);right:0;width:380px;bottom:0;background:var(--panel);border-left:1px solid var(--border);overflow-y:auto;z-index:10;-webkit-overflow-scrolling:touch}
+  #side{padding:18px}
+  #sheetHandle{display:none}
+  aside h2{font-size:15px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+  aside h3{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin:18px 0 8px;font-weight:600}
+  .card{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:12px}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px}
+  .kv div:nth-child(odd){color:var(--muted)}
+  .kv div:nth-child(even){text-align:right;word-break:break-all}
+  .full{word-break:break-all;background:#0b0f18;border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin:6px 0 10px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;background:#243049;color:#b9c6e6}
+  .badge.root{background:#f7931a26;color:var(--btc2);border:1px solid #f7931a66}
+  .badge.in{background:#2bc4a922;color:var(--teal)} .badge.out{background:#ff5d6c22;color:#ff8a95}
+  .badge.unc{background:#a78bfa22;color:var(--violet)}
+  .btnrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .io{list-style:none;margin:0;padding:0;font-size:12px}
+  .io li{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px dashed #252d3e}
+  .io li:last-child{border-bottom:0}
+  .io li.me{color:var(--btc2);font-weight:600}
+  .io .amt{white-space:nowrap;color:var(--text)}
+  .txlist{list-style:none;margin:0;padding:0}
+  .txlist li{padding:8px 10px;border:1px solid var(--border);border-radius:9px;margin-bottom:6px;cursor:pointer;font-size:12px;display:flex;justify-content:space-between;gap:8px;align-items:center;background:#0f141f}
+  .txlist li:hover{border-color:#3a4763;background:#141b29}
+  .txlist li.hl{border-color:#f7931a88}
+  .muted{color:var(--muted)} .small{font-size:12px}
+  .welcome{color:var(--muted)} .welcome p{margin:8px 0}
+  .examples button{font-size:12px;padding:6px 10px;margin:4px 4px 0 0}
+
+  #legend{position:fixed;left:14px;bottom:14px;background:#121722e6;border:1px solid var(--border);border-radius:12px;padding:10px 14px;font-size:12px;z-index:5;backdrop-filter:blur(6px);max-width:300px}
+  #legend .row{display:flex;align-items:center;gap:8px;margin:4px 0}
+  #legend .dot{width:12px;height:12px;border-radius:50%;flex:none}
+  #legend .line{width:26px;height:0;border-top:3px solid;flex:none}
+  #legend .hint{color:var(--muted);margin-top:6px;border-top:1px solid var(--border);padding-top:6px;line-height:1.5}
+  #legend .toggle{cursor:pointer;color:var(--muted);float:right;margin-left:10px}
+  #legend.collapsed .body{display:none}
+  #counters{position:fixed;left:14px;top:calc(var(--hdr) + 14px);font-size:12px;color:var(--muted);z-index:5;background:#121722cc;border:1px solid var(--border);border-radius:10px;padding:6px 10px;display:flex;gap:12px;align-items:center}
+  #counters label{display:flex;gap:5px;align-items:center;cursor:pointer}
+  #empty{position:fixed;top:var(--hdr);left:0;right:380px;bottom:0;display:grid;place-items:center;pointer-events:none;z-index:2}
+  #empty .box{text-align:center;color:var(--muted);max-width:460px}
+  #empty .big{font-size:64px;color:#f7931a55;line-height:1}
+  #empty h2{color:var(--text);font-weight:600;margin:10px 0 6px}
+
+  #tooltip{position:fixed;pointer-events:none;background:#0d121ceE;border:1px solid #33405a;border-radius:10px;padding:9px 11px;font-size:12px;z-index:50;max-width:340px;box-shadow:0 8px 24px #0008;opacity:0;transition:opacity .1s}
+  #tooltip .t{font-weight:650;margin-bottom:4px}
+  #tooltip .r{display:flex;justify-content:space-between;gap:14px}
+  #tooltip .r span:first-child{color:var(--muted)}
+  #toasts{position:fixed;top:calc(var(--hdr) + 12px);left:50%;transform:translateX(-50%);z-index:60;display:flex;flex-direction:column;gap:8px;align-items:center}
+  .toast{background:#1c2334;border:1px solid var(--border);border-left:4px solid var(--blue);padding:10px 14px;border-radius:10px;box-shadow:0 8px 24px #0009;max-width:520px;font-size:13px;animation:tin .2s ease}
+  .toast.error{border-left-color:var(--red)} .toast.warn{border-left-color:var(--btc)}
+  @keyframes tin{from{opacity:0;transform:translateY(-6px)}}
+
+  /* Graph */
+  .link path.vis{fill:none;stroke-linecap:round;transition:stroke-opacity .15s}
+  .link path.hit{fill:none;stroke:transparent;stroke-width:12;cursor:pointer}
+  .link.in path.vis{stroke:#2bc4a9}
+  .link.out path.vis{stroke:#6b7a99}
+  .link.root path.vis{stroke:var(--btc)}
+  .link.selected path.vis{stroke:#fff !important}
+  .link text{font-size:9.5px;fill:#c9cfdb;paint-order:stroke;stroke:#0b0e14;stroke-width:3px;pointer-events:none}
+  .link.root text{fill:var(--btc2)}
+  .dim .link:not(.nb){opacity:.12} .dim .node:not(.nb){opacity:.25}
+  .node{cursor:pointer}
+  .node circle.main{stroke:#0b0e14;stroke-width:2px;transition:r .2s}
+  .node text{font-size:10px;fill:#aab2c5;pointer-events:none;paint-order:stroke;stroke:#0b0e14;stroke-width:3px;font-family:ui-monospace,Menlo,Consolas,monospace}
+  .node.root text{fill:var(--btc2);font-weight:700;font-size:11px}
+  .node.target text{fill:#7dd3fc;font-weight:700;font-size:11px}
+  .node.selected circle.main{stroke:#fff;stroke-width:3px}
+  .node circle.ring{fill:none;stroke:var(--btc);stroke-width:2px;opacity:.7}
+  .node.loading circle.load{fill:none;stroke:#fff;stroke-width:2px;stroke-dasharray:6 6;animation:spin2 1s linear infinite;transform-box:fill-box;transform-origin:center}
+  @keyframes spin2{to{transform:rotate(360deg)}}
+  .node.pinned circle.main{stroke-dasharray:3 2}
+  /* Modus-Umschalter & Verbindungssuche */
+  .tabs{display:flex;background:#0b0f18;border:1px solid var(--border);border-radius:10px;padding:3px;gap:2px}
+  .tabs button{border:0;background:transparent;padding:7px 12px;border-radius:8px;color:var(--muted)}
+  .tabs button.active{background:var(--panel2);color:var(--text);box-shadow:inset 0 0 0 1px #34405a}
+  form#connectForm{flex:1;display:none;gap:8px;max-width:900px;align-items:center}
+  body.connect form#searchForm{display:none} body.connect form#connectForm{display:flex}
+  #connectForm input{flex:1;min-width:0;background:#0b0f18;border:1px solid var(--border);color:var(--text);border-radius:10px;padding:10px 12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;outline:none}
+  #connectForm input:focus{border-color:var(--btc)} #connectForm input.invalid{border-color:var(--red)}
+  #connectForm #addrB:focus{border-color:#38bdf8}
+  #connectForm .lbl{font-weight:700;font-size:12px;width:22px;height:22px;border-radius:50%;display:grid;place-items:center;flex:none}
+  .lblA{background:var(--btc);color:#1a1004} .lblB{background:#38bdf8;color:#04121a}
+  #swapBtn{padding:8px 10px}
+  .only-connect{display:none} body.connect .only-connect{display:flex} body.connect .only-explore{display:none !important}
+  #legend .row.only-connect{display:none} body.connect #legend .row.only-connect{display:flex}
+  .form-grid{display:grid;grid-template-columns:1fr 92px;gap:8px 10px;align-items:center;font-size:13px}
+  .form-grid input[type=number]{width:100%;background:#0b0f18;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 8px;font:inherit}
+  .form-grid .help{grid-column:1/-1;color:var(--muted);font-size:11.5px;margin-top:-4px}
+  .chk{display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-top:10px;cursor:pointer}
+  .chk input{margin-top:3px}
+  .prog .big{font-size:22px;font-weight:700}
+  .bar{height:6px;background:#0b0f18;border-radius:6px;overflow:hidden;margin:8px 0 10px}
+  .bar div{height:100%;background:linear-gradient(90deg,var(--btc),#38bdf8);transition:width .3s}
+  .paths{list-style:none;margin:0;padding:0}
+  .paths>li{border:1px solid var(--border);border-radius:10px;margin-bottom:8px;background:#0f141f;overflow:hidden}
+  .paths>li.active{border-color:var(--btc)}
+  .paths .ph{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;cursor:pointer;font-size:12.5px;background:#131a28}
+  .paths .ph:hover{background:#18203a}
+  .hop{padding:6px 10px;border-top:1px dashed #252d3e;font-size:12px}
+  .hop .ad{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .hop .tx{display:grid;grid-template-columns:auto 1fr auto;gap:10px;white-space:nowrap;color:var(--muted);padding-left:10px;margin-top:2px}
+  .hop .tx span:nth-child(2){text-align:right;color:var(--text)}
+  .tagA{color:var(--btc2);font-weight:700} .tagB{color:#7dd3fc;font-weight:700}
+  .link.co path.vis{stroke:#a78bfa;stroke-dasharray:5 4}
+  .notice{border-left:4px solid var(--btc);background:#1c2334;border-radius:10px;padding:10px 12px;font-size:13px;margin-bottom:12px}
+  .notice.bad{border-left-color:var(--red)}
+  /* ---------- Mobil (iPhone & Co.) ---------- */
+  @media (max-width:900px){
+    header{flex-wrap:wrap;gap:8px;padding:calc(env(safe-area-inset-top) + 8px) 10px 8px;align-items:center}
+    .brand h1,.brand small{display:none}
+    .logo{width:30px;height:30px;font-size:17px}
+    .tabs button{padding:7px 10px;font-size:13px}
+    .hdr-tools{margin-left:auto;gap:6px}
+    .hdr-tools button{padding:8px 10px}
+    .hdr-tools .lbltxt{display:none}
+    #status{min-width:0;order:3}
+    #status #statusText{display:none}
+    form#searchForm,form#connectForm{order:10;flex:1 1 100%;max-width:none}
+    body.connect form#connectForm{display:grid;grid-template-columns:22px 1fr 118px;gap:6px 6px}
+    #connectBtn{white-space:normal;line-height:1.15;font-size:12.5px}
+    #connectBtn{min-width:96px}
+    #addrInput,#connectForm input{font-size:16px;padding:9px 10px} /* 16px verhindert Auto-Zoom in iOS Safari */
+    #graph,#empty{right:0;bottom:calc(var(--sheet-min) + env(safe-area-inset-bottom))}
+    #sideWrap{top:auto;left:0;width:auto;height:calc(var(--sheet-min) + env(safe-area-inset-bottom));border-left:0;border-top:1px solid var(--border);
+      border-radius:16px 16px 0 0;box-shadow:0 -10px 30px #0009;transition:height .25s ease;overflow:hidden;padding-bottom:env(safe-area-inset-bottom)}
+    #sideWrap.open{height:58vh;height:58dvh;overflow-y:auto}
+    #sideWrap.full{height:calc(100vh - var(--hdr));height:calc(100dvh - var(--hdr));overflow-y:auto}
+    #sheetHandle{display:flex;position:sticky;top:0;z-index:2;align-items:center;justify-content:space-between;gap:10px;height:var(--sheet-min);padding:0 14px;
+      background:var(--panel);border-bottom:1px solid var(--border);cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+    #sheetHandle .grip{position:absolute;top:6px;left:50%;width:40px;height:4px;margin-left:-20px;border-radius:4px;background:#3a4560}
+    #sheetHandle .ttl{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    #sheetHandle .btns{display:flex;gap:6px}
+    #sheetHandle button{padding:6px 10px;font-size:12px}
+    #side{padding:14px 14px 24px}
+    #legend{left:8px;bottom:calc(var(--sheet-min) + env(safe-area-inset-bottom) + 8px);max-width:calc(100vw - 16px);font-size:11.5px;padding:8px 12px}
+    #counters{left:8px;top:calc(var(--hdr) + 8px);padding:4px 8px;gap:8px;font-size:11px}
+    #cntEdges{display:none}
+    #toasts{width:calc(100vw - 20px)} .toast{font-size:12.5px}
+    #empty .box{padding:0 24px} #empty .big{font-size:48px}
+    .kv{font-size:12.5px}
+    .txlist li,.paths .ph{padding:10px}
+    button{min-height:36px}
+  }
+  @media (hover:none){ #tooltip{display:none !important} }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="logo">₿</div>
+    <div><h1>Bitcoin Transaktions-Explorer</h1><small>Geldflüsse als interaktiver Graph</small></div>
+  </div>
+  <div class="tabs" role="tablist">
+    <button type="button" id="tabExplore" class="active" title="Adresse erkunden">Explorer</button>
+    <button type="button" id="tabConnect" title="Verbindung zwischen zwei Adressen suchen">Verbindung suchen</button>
+  </div>
+  <form id="searchForm" autocomplete="off">
+    <input id="addrInput" spellcheck="false" placeholder="Bitcoin-Adresse eingeben (1…, 3…, bc1q…, bc1p…)" aria-label="Bitcoin-Adresse">
+    <button class="primary" type="submit" id="goBtn">Anzeigen</button>
+  </form>
+  <form id="connectForm" autocomplete="off">
+    <span class="lbl lblA">A</span><input id="addrA" spellcheck="false" placeholder="Adresse A (Start)" aria-label="Adresse A">
+    <button type="button" id="swapBtn" title="A und B tauschen">⇄</button>
+    <span class="lbl lblB">B</span><input id="addrB" spellcheck="false" placeholder="Adresse B (Ziel)" aria-label="Adresse B">
+    <button class="primary" type="submit" id="connectBtn">Verbindung suchen</button>
+  </form>
+  <div class="hdr-tools">
+    <button id="fitBtn" title="Graph in die Ansicht einpassen" aria-label="Einpassen">⤢<span class="lbltxt"> Einpassen</span></button>
+    <button id="resetBtn" title="Alles zurücksetzen" aria-label="Zurücksetzen">↺<span class="lbltxt"> Zurücksetzen</span></button>
+  </div>
+  <div id="status"><span class="spinner"></span><span id="statusText">Bereit</span></div>
+</header>
+
+<div id="graph"><svg id="svg"></svg></div>
